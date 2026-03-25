@@ -290,31 +290,6 @@ export class TipsService {
     return savedTip;
   }
 
-  async getTipsByTrack(
-    trackId: string,
-    paginationQuery: PaginationQueryDto,
-  ): Promise<PaginatedResponseDto<Tip>> {
-    const { page = 1, limit = 10, status } = paginationQuery;
-    const skip = (page - 1) * limit;
-
-    const queryBuilder = this.tipRepository
-      .createQueryBuilder("tip")
-      .leftJoinAndSelect("tip.fromUser", "user")
-      .leftJoinAndSelect("tip.artist", "artist")
-      .where("tip.trackId = :trackId", { trackId })
-      .orderBy("tip.createdAt", "DESC")
-      .skip(skip)
-      .take(limit);
-
-    if (status) {
-      queryBuilder.andWhere("tip.status = :status", { status });
-    }
-
-    const [data, total] = await queryBuilder.getManyAndCount();
-
-    return this.createPaginatedResponse(data, total, page, limit);
-  }
-
   async getArtistTipStats(artistId: string): Promise<{
     totalTips: number;
     totalAmount: number;

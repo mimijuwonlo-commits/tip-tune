@@ -14,6 +14,7 @@ import { BlocksModule } from "../blocks/blocks.module";
 import { TracksModule } from "../tracks/tracks.module";
 import { TipReconciliationService } from "./tip-reconciliation.service";
 import { Track } from "@/tracks/entities/track.entity";
+import { TipReconciliationScheduler } from "./tip-reconciliation.scheduler";
 
 @Module({
   imports: [
@@ -30,7 +31,7 @@ import { Track } from "@/tracks/entities/track.entity";
   ],
   controllers: [TipsController],
   // --- NEW ADDITION: Added TipReconciliationService ---
-  providers: [TipsService, TipReconciliationService],
+  providers: [TipsService, TipReconciliationService, TipReconciliationScheduler],
   exports: [TipsService, TipReconciliationService],
 })
 export class TipsModule {}
