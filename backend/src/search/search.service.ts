@@ -52,7 +52,7 @@ export class SearchService {
     private readonly trackRepo: Repository<Track>,
     @InjectRepository(ArtistStatus)
     private readonly statusRepo: Repository<ArtistStatus>,
-  ) {}
+  ) { }
 
   async search(dto: SearchQueryDto): Promise<SearchResult> {
     const types: SearchType[] = dto.type ? [dto.type] : ["artist", "track"];
@@ -280,22 +280,37 @@ export class SearchService {
 
     const like = `%${sanitized.replace(/%/g, "\\%")}%`;
     const result: { artists: SearchSuggestion[]; tracks: SearchSuggestion[] } =
-      {
-        artists: [],
-        tracks: [],
-      };
+    {
+      artists: [],
+      tracks: [],
+    };
 
     const take = type ? limit : Math.ceil(limit / 2);
 
     if (!type || type === "artist") {
       const artists = await this.artistRepo
         .createQueryBuilder("artist")
-        .select(["artist.id", "artist.artistName", "artist.genre"])
+        .select([
+          "artist.id",
+          "artist.artistName",
+          "artist.genre",
+          // Engagement fields — required by the frontend ranking algorithm
+          "artist.totalTipsReceived",
+          "artist.createdAt",
+        ])
         .where(
           `(artist."artistName" ILIKE :like OR artist.genre ILIKE :like)`,
           { like },
         )
-        .orderBy("artist.artistName", "ASC")
+        // Pre-sort: prefix match first, then tips descending as a cheap DB-level hint.
+        // The frontend applies the full scored ranking after receiving the payload.
+        .orderBy(
+          `CASE WHEN artist."artistName" ILIKE :prefix THEN 0 ELSE 1 END`,
+          "ASC",
+        )
+        .addOrderBy("artist.totalTipsReceived", "DESC")
+        .addOrderBy("artist.createdAt", "DESC")
+        .setParameter("prefix", `${sanitized}%`)
         .take(take)
         .getMany();
 
@@ -304,6 +319,9 @@ export class SearchService {
         id: a.id,
         title: a.artistName,
         subtitle: a.genre ?? undefined,
+        tips: Number(a.totalTipsReceived) || 0,
+        plays: 0,            // Artists don't have a plays column; tips carry weight
+        createdAt: a.createdAt?.toISOString(),
       }));
     }
 
@@ -315,12 +333,23 @@ export class SearchService {
           "track.id",
           "track.title",
           "track.genre",
+          "track.plays",
+          "track.tipCount",
+          "track.createdAt",
           "artist.id",
           "artist.artistName",
         ])
         .where(`(track.title ILIKE :like OR track.genre ILIKE :like)`, { like })
         .andWhere("track.isPublic = :isPublic", { isPublic: true })
-        .orderBy("track.title", "ASC")
+        // Same DB-level hint for tracks
+        .orderBy(
+          `CASE WHEN track.title ILIKE :prefix THEN 0 ELSE 1 END`,
+          "ASC",
+        )
+        .addOrderBy("track.plays", "DESC")
+        .addOrderBy("track.tipCount", "DESC")
+        .addOrderBy("track.createdAt", "DESC")
+        .setParameter("prefix", `${sanitized}%`)
         .take(take)
         .getMany();
 
@@ -331,6 +360,9 @@ export class SearchService {
         subtitle:
           [t.genre, t.artist?.artistName].filter(Boolean).join(" · ") ||
           undefined,
+        plays: t.plays ?? 0,
+        tips: t.tipCount ?? 0,
+        createdAt: t.createdAt?.toISOString(),
       }));
     }
 

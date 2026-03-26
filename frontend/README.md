@@ -21,16 +21,19 @@ React frontend application for TipTune - Real-time music tips powered by Stellar
 ## Installation
 
 1. Install dependencies:
+
 ```bash
 npm install
 ```
 
-2. Copy environment variables:
+1. Copy environment variables:
+
 ```bash
 cp .env.example .env
 ```
 
-3. Update `.env` with your configuration:
+1. Update `.env` with your configuration:
+
 ```env
 VITE_API_BASE_URL=http://localhost:3001/api/v1
 VITE_STELLAR_NETWORK=testnet
@@ -40,6 +43,7 @@ VITE_STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org
 ## Development
 
 Start the development server:
+
 ```bash
 npm run dev
 ```
@@ -49,11 +53,13 @@ The app will be available at `http://localhost:3000`
 ## Build
 
 Build for production:
+
 ```bash
 npm run build
 ```
 
 Preview production build:
+
 ```bash
 npm run preview
 ```
@@ -103,12 +109,14 @@ frontend/
 ## API Integration
 
 The frontend is configured to proxy API requests to the backend:
+
 - API base URL: `http://localhost:3001/api/v1`
 - All `/api/*` requests are proxied to the backend
 
 ## Stellar Integration
 
 Stellar utilities are available in `src/utils/stellar.ts`:
+
 - Server configuration (testnet/mainnet)
 - Address validation
 - Amount formatting

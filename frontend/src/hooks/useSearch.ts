@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { searchService, DEBOUNCE_MS } from "../services/searchService";
+import { rankSuggestions } from "../utils/searchRanking";
 import type {
   SearchResult,
   SearchSuggestionsResponse,
@@ -139,10 +140,23 @@ export function useSearch(): UseSearchReturn {
       .getSuggestions(q, typeFilter, 10)
       .then((res: SearchSuggestionsResponse) => {
         const combined: SearchSuggestionItem[] = [
-          ...res.artists.map((a) => ({ ...a, type: "artist" as const })),
-          ...res.tracks.map((t) => ({ ...t, type: "track" as const })),
+          ...res.artists.map((a) => ({
+            ...a,
+            type: "artist" as const,
+            plays: a.plays,
+            tips: a.tips,
+            createdAt: a.createdAt,
+          })),
+          ...res.tracks.map((t) => ({
+            ...t,
+            type: "track" as const,
+            plays: t.plays,
+            tips: t.tips,
+            createdAt: t.createdAt,
+          })),
         ];
-        setSuggestions(combined.slice(0, 10));
+        // Rank by: prefix match → engagement → recency → alphabetical
+        setSuggestions(rankSuggestions(combined, q).slice(0, 10));
       })
       .catch(() => setSuggestions([]))
       .finally(() => setSuggestionsLoading(false));

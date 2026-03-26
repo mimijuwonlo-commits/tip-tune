@@ -18,6 +18,12 @@ export interface SearchSuggestionItem {
   id: string;
   title: string;
   subtitle?: string;
+  /** Raw play count — used for engagement ranking */
+  plays?: number;
+  /** Raw tip count — used for engagement ranking */
+  tips?: number;
+  /** ISO timestamp — used for recency ranking */
+  createdAt?: string;
 }
 
 export interface SearchSuggestionsResponse {

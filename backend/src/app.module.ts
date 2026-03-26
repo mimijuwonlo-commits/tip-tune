@@ -37,6 +37,7 @@ import { ArtistStatusModule } from "./artist-status/artist-status.module";
 import { WebSocketModule } from "./websocket/websocket.module";
 import { CustomThrottlerRedisStorage } from "./custom-throttler-storage-redis";
 import { VaryAcceptEncodingMiddleware } from "./common/middleware/vary-accept-encoding.middleware";
+import { SubscriptionsModule } from "./subscription-tiers/subscriptions.module";
 
 @Module({
   imports: [
@@ -109,6 +110,7 @@ import { VaryAcceptEncodingMiddleware } from "./common/middleware/vary-accept-en
     VersionModule,
     ArtistStatusModule,
     WebSocketModule,
+    SubscriptionsModule,
   ],
   controllers: [],
   providers: [
