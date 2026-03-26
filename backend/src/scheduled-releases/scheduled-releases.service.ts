@@ -5,9 +5,9 @@ import {
   Logger,
 } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
-import { Repository, LessThanOrEqual } from "typeorm";
+import { Repository, LessThanOrEqual, IsNull, Not } from "typeorm";
 import { Cron, CronExpression } from "@nestjs/schedule";
-import { ScheduledRelease } from "./entities/scheduled-release.entity";
+import { ScheduledRelease, ReleaseStatus } from "./entities/scheduled-release.entity";
 import { PreSave } from "./entities/presave.entity";
 import { Track } from "../tracks/entities/track.entity";
 import { NotificationsService } from "../notifications/notifications.service";
@@ -17,6 +17,8 @@ import { NotificationType } from "@/notifications/notification.entity";
 @Injectable()
 export class ScheduledReleasesService {
   private readonly logger = new Logger(ScheduledReleasesService.name);
+  private readonly maxRetries = 3;
+  private readonly retryDelayMs = 5000; // 5 seconds
 
   constructor(
     @InjectRepository(ScheduledRelease)
@@ -150,52 +152,247 @@ export class ScheduledReleasesService {
   async handleScheduledReleases(): Promise<void> {
     this.logger.log("Checking for scheduled releases...");
 
-    const releasesToPublish = await this.scheduledReleaseRepository.find({
-      where: {
-        releaseDate: LessThanOrEqual(new Date()),
-        isReleased: false,
-      },
-      relations: ["track", "track.artist"],
-    });
+    try {
+      // Find releases that are due and not yet released or failed
+      const releasesToPublish = await this.scheduledReleaseRepository.find({
+        where: {
+          releaseDate: LessThanOrEqual(new Date()),
+          isReleased: false,
+          status: Not(ReleaseStatus.FAILED_PERMANENTLY),
+        },
+        relations: ["track", "track.artist"],
+        order: { releaseDate: "ASC" },
+      });
 
-    if (releasesToPublish.length === 0) {
-      this.logger.log("No releases to publish");
+      if (releasesToPublish.length === 0) {
+        this.logger.log("No releases to publish");
+        return;
+      }
+
+      this.logger.log(
+        `Found ${releasesToPublish.length} releases to process`,
+      );
+
+      // Process releases with idempotency check
+      for (const release of releasesToPublish) {
+        await this.processReleaseWithRetry(release);
+      }
+
+      // Clean up old failed releases
+      await this.cleanupOldFailedReleases();
+    } catch (error) {
+      this.logger.error(
+        `Error in scheduled release job: ${error.message}`,
+      );
+    }
+  }
+
+  /**
+   * Process a release with retry logic and idempotency protection
+   */
+  private async processReleaseWithRetry(
+    release: ScheduledRelease,
+  ): Promise<void> {
+    // Idempotency check - skip if already processing or released
+    if (
+      release.isReleased ||
+      release.status === ReleaseStatus.PUBLISHING
+    ) {
+      this.logger.debug(
+        `Skipping release ${release.id} - already processed or publishing`,
+      );
       return;
     }
 
-    this.logger.log(`Publishing ${releasesToPublish.length} releases`);
+    // Check if we should retry based on attempt count
+    if (release.retryCount >= this.maxRetries) {
+      this.logger.warn(
+        `Release ${release.id} has exceeded max retries (${this.maxRetries}). Marking as permanently failed.`,
+      );
+      await this.markAsPermanentlyFailed(release);
+      return;
+    }
 
-    for (const release of releasesToPublish) {
-      try {
-        await this.releaseTrack(release);
-      } catch (error) {
-        this.logger.error(
-          `Failed to release track ${release.trackId}: ${error.message}`,
-        );
+    try {
+      // Mark as publishing to prevent duplicate processing
+      await this.updateReleaseStatus(
+        release.id,
+        ReleaseStatus.PUBLISHING,
+      );
+
+      this.logger.log(
+        `Processing release ${release.id} (attempt ${release.retryCount + 1}/${this.maxRetries})`,
+      );
+
+      await this.releaseTrack(release);
+
+      // Success - mark as published
+      await this.updateReleaseStatus(
+        release.id,
+        ReleaseStatus.PUBLISHED,
+      );
+
+      this.logger.log(
+        `Successfully released track ${release.track.title} (${release.trackId})`,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to release track ${release.id}: ${error.message}`,
+      );
+
+      // Increment retry counter and mark for retry
+      await this.handleReleaseFailure(release, error);
+    }
+  }
+
+  /**
+   * Handle release failure with proper state management
+   */
+  private async handleReleaseFailure(
+    release: ScheduledRelease,
+    error: Error,
+  ): Promise<void> {
+    const retryCount = release.retryCount + 1;
+
+    if (retryCount < this.maxRetries) {
+      // Schedule for retry
+      await this.scheduledReleaseRepository.update(release.id, {
+        retryCount,
+        lastError: error.message,
+        lastAttemptAt: new Date(),
+        status: ReleaseStatus.PENDING,
+        nextRetryAt: new Date(Date.now() + this.retryDelayMs),
+      });
+
+      this.logger.log(
+        `Release ${release.id} scheduled for retry #${retryCount}`,
+      );
+    } else {
+      await this.markAsPermanentlyFailed(release);
+    }
+  }
+
+  /**
+   * Mark release as permanently failed after exhausting retries
+   */
+  private async markAsPermanentlyFailed(
+    release: ScheduledRelease,
+  ): Promise<void> {
+    await this.scheduledReleaseRepository.update(release.id, {
+      status: ReleaseStatus.FAILED_PERMANENTLY,
+      lastError: `Failed after ${this.maxRetries} attempts`,
+      failedAt: new Date(),
+    });
+
+    this.logger.error(
+      `Release ${release.id} marked as permanently failed`,
+    );
+  }
+
+  /**
+   * Update release status with proper state transition
+   */
+  private async updateReleaseStatus(
+    releaseId: string,
+    status: ReleaseStatus,
+  ): Promise<void> {
+    await this.scheduledReleaseRepository.update(releaseId, {
+      status,
+      updatedAt: new Date(),
+    });
+  }
+
+  /**
+   * Clean up old failed releases (older than 30 days)
+   */
+  private async cleanupOldFailedReleases(): Promise<void> {
+    const thirtyDaysAgo = new Date(
+      Date.now() - 30 * 24 * 60 * 60 * 1000,
+    );
+
+    const oldFailedReleases = await this.scheduledReleaseRepository.find({
+      where: {
+        status: ReleaseStatus.FAILED_PERMANENTLY,
+        failedAt: LessThanOrEqual(thirtyDaysAgo),
+      },
+    });
+
+    if (oldFailedReleases.length > 0) {
+      this.logger.log(
+        `Cleaning up ${oldFailedReleases.length} old failed releases`,
+      );
+
+      for (const release of oldFailedReleases) {
+        // Reset track visibility if needed
+        try {
+          await this.trackRepository.update(release.trackId, {
+            isPublic: false,
+          });
+        } catch (error) {
+          this.logger.warn(
+            `Failed to reset track visibility for ${release.trackId}: ${error.message}`,
+          );
+        }
       }
+
+      // Archive or delete old failed releases
+      await this.scheduledReleaseRepository.delete({
+        id: oldFailedReleases.map((r) => r.id),
+      });
     }
   }
 
   private async releaseTrack(release: ScheduledRelease): Promise<void> {
+    // Ensure track exists and is in valid state
+    const track = await this.trackRepository.findOne({
+      where: { id: release.trackId },
+      relations: ["artist"],
+    });
+
+    if (!track) {
+      throw new Error(`Track ${release.trackId} not found`);
+    }
+
     // Mark track as public
     await this.trackRepository.update(release.trackId, {
       isPublic: true,
+      publishedAt: new Date(),
     });
+
+    this.logger.log(`Track ${release.trackId} marked as public`);
 
     // Mark release as completed
     release.isReleased = true;
+    release.publishedAt = new Date();
     await this.scheduledReleaseRepository.save(release);
 
-    // Notify pre-savers
-    await this.notifyPreSavers(release);
+    this.logger.log(
+      `Release ${release.id} marked as released`,
+    );
 
-    // Notify followers if enabled
+    // Notify pre-savers (with error handling)
+    try {
+      await this.notifyPreSavers(release);
+    } catch (error) {
+      this.logger.error(
+        `Failed to notify pre-savers for release ${release.id}: ${error.message}`,
+      );
+      // Don't fail the entire release if notifications fail
+    }
+
+    // Notify followers if enabled (with error handling)
     if (release.notifyFollowers) {
-      await this.notifyFollowers(release);
+      try {
+        await this.notifyFollowers(release);
+      } catch (error) {
+        this.logger.error(
+          `Failed to notify followers for release ${release.id}: ${error.message}`,
+        );
+      }
     }
 
     this.logger.log(
-      `Successfully released track ${release.track.title} (${release.trackId})`,
+      `Successfully completed release process for track ${release.track.title} (${release.trackId})`,
     );
   }
 

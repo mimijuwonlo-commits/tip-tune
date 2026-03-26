@@ -18,8 +18,16 @@ export enum EventType {
   ALBUM_RELEASE = 'album_release',
 }
 
+export enum EventStatus {
+  UPCOMING = 'upcoming',
+  LIVE = 'live',
+  ENDED = 'ended',
+  CANCELLED = 'cancelled',
+}
+
 @Entity('artist_events')
 @Index(['artistId', 'startTime'])
+@Index(['status', 'startTime'])
 export class ArtistEvent {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -47,6 +55,14 @@ export class ArtistEvent {
   @Column({ name: 'end_time', type: 'timestamptz', nullable: true })
   endTime: Date | null;
 
+  @Column({
+    name: 'status',
+    type: 'enum',
+    enum: EventStatus,
+    default: EventStatus.UPCOMING,
+  })
+  status: EventStatus;
+
   @Column({ length: 255, nullable: true })
   venue: string | null;
 
@@ -64,6 +80,12 @@ export class ArtistEvent {
 
   @Column({ name: 'reminder_sent', default: false })
   reminderSent: boolean;
+
+  @Column({ name: 'went_live_at', type: 'timestamptz', nullable: true })
+  wentLiveAt: Date | null;
+
+  @Column({ name: 'ended_at', type: 'timestamptz', nullable: true })
+  endedAt: Date | null;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;

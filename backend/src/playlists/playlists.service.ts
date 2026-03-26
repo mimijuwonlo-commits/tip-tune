@@ -6,7 +6,7 @@ import {
   Logger,
 } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
-import { Repository, In, Brackets } from "typeorm";
+import { Repository, In, Brackets, LessThanOrEqual } from "typeorm";
 import { Playlist } from "./entities/playlist.entity";
 import { PlaylistTrack } from "./entities/playlist-track.entity";
 import {
@@ -738,6 +738,13 @@ export class PlaylistsService {
       throw new NotFoundException("Change request not found");
     }
 
+    // Check if change request has expired
+    if (changeRequest.expiresAt && new Date() > changeRequest.expiresAt) {
+      changeRequest.status = PlaylistChangeStatus.EXPIRED;
+      await this.changeRequestRepository.save(changeRequest);
+      throw new BadRequestException("Change request has expired");
+    }
+
     let updatedPlaylist: Playlist;
 
     if (changeRequest.action === PlaylistChangeAction.ADD_TRACK) {
@@ -759,17 +766,20 @@ export class PlaylistsService {
         changeRequest.requestedById,
         userId,
       );
-    } else {
+    } else if (changeRequest.action === PlaylistChangeAction.REORDER_TRACKS) {
       const payload = changeRequest.payload as {
         tracks: { trackId: string; position: number }[];
       };
       await this.applyReorderTracks(playlistId, { tracks: payload.tracks });
       updatedPlaylist = await this.findOne(playlistId, userId);
+    } else {
+      throw new BadRequestException("Unsupported change action");
     }
 
     changeRequest.status = PlaylistChangeStatus.APPROVED;
     changeRequest.reviewedById = userId;
     changeRequest.reviewedAt = new Date();
+    changeRequest.updatedAt = new Date();
     await this.changeRequestRepository.save(changeRequest);
 
     await this.safeCreateActivity({
@@ -780,6 +790,7 @@ export class PlaylistsService {
       metadata: {
         changeRequestId: changeRequest.id,
         action: changeRequest.action,
+        requestedByUserId: changeRequest.requestedById,
       },
     });
 
@@ -790,6 +801,7 @@ export class PlaylistsService {
     playlistId: string,
     changeRequestId: string,
     userId: string,
+    reason?: string,
   ): Promise<PlaylistChangeRequest> {
     const playlist = await this.getPlaylistForEdit(playlistId);
 
@@ -813,9 +825,18 @@ export class PlaylistsService {
       throw new NotFoundException("Change request not found");
     }
 
+    // Check if change request has expired
+    if (changeRequest.expiresAt && new Date() > changeRequest.expiresAt) {
+      changeRequest.status = PlaylistChangeStatus.EXPIRED;
+      await this.changeRequestRepository.save(changeRequest);
+      throw new BadRequestException("Change request has expired");
+    }
+
     changeRequest.status = PlaylistChangeStatus.REJECTED;
     changeRequest.reviewedById = userId;
     changeRequest.reviewedAt = new Date();
+    changeRequest.rejectionReason = reason || null;
+    changeRequest.updatedAt = new Date();
 
     const saved = await this.changeRequestRepository.save(changeRequest);
 
@@ -827,10 +848,94 @@ export class PlaylistsService {
       metadata: {
         changeRequestId: changeRequest.id,
         action: changeRequest.action,
+        requestedByUserId: changeRequest.requestedById,
+        reason: changeRequest.rejectionReason,
       },
     });
 
     return saved;
+  }
+
+  async cancelChangeRequest(
+    playlistId: string,
+    changeRequestId: string,
+    userId: string,
+  ): Promise<PlaylistChangeRequest> {
+    const changeRequest = await this.changeRequestRepository.findOne({
+      where: {
+        id: changeRequestId,
+        playlistId,
+        status: PlaylistChangeStatus.PENDING,
+      },
+    });
+
+    if (!changeRequest) {
+      throw new NotFoundException("Change request not found");
+    }
+
+    // Only the requester or playlist owner can cancel
+    if (changeRequest.requestedById !== userId) {
+      const playlist = await this.getPlaylistForEdit(playlistId);
+      if (playlist.userId !== userId) {
+        throw new ForbiddenException("You cannot cancel this change request");
+      }
+    }
+
+    changeRequest.status = PlaylistChangeStatus.CANCELLED;
+    changeRequest.cancelledAt = new Date();
+    changeRequest.updatedAt = new Date();
+
+    const saved = await this.changeRequestRepository.save(changeRequest);
+
+    await this.safeCreateActivity({
+      userId,
+      activityType: ActivityType.PLAYLIST_CHANGE_CANCELLED,
+      entityType: EntityType.PLAYLIST,
+      entityId: playlistId,
+      metadata: {
+        changeRequestId: changeRequest.id,
+        action: changeRequest.action,
+      },
+    });
+
+    return saved;
+  }
+
+  /**
+   * Clean up expired change requests (run periodically)
+   */
+  async cleanupExpiredChangeRequests(): Promise<number> {
+    const now = new Date();
+    const expiredRequests = await this.changeRequestRepository.find({
+      where: {
+        status: PlaylistChangeStatus.PENDING,
+        expiresAt: LessThanOrEqual(now),
+      },
+    });
+
+    if (expiredRequests.length === 0) {
+      return 0;
+    }
+
+    for (const request of expiredRequests) {
+      request.status = PlaylistChangeStatus.EXPIRED;
+      request.updatedAt = new Date();
+      await this.changeRequestRepository.save(request);
+
+      await this.safeCreateActivity({
+        userId: request.requestedById,
+        activityType: ActivityType.PLAYLIST_CHANGE_EXPIRED,
+        entityType: EntityType.PLAYLIST,
+        entityId: request.playlistId,
+        metadata: {
+          changeRequestId: request.id,
+          action: request.action,
+        },
+      });
+    }
+
+    this.logger.log(`Cleaned up ${expiredRequests.length} expired change requests`);
+    return expiredRequests.length;
   }
 
   private async getPlaylistForEdit(playlistId: string): Promise<Playlist> {

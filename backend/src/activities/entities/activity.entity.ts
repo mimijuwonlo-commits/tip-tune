@@ -27,6 +27,8 @@ export enum ActivityType {
   PLAYLIST_CHANGE_REQUESTED = 'playlist_change_requested',
   PLAYLIST_CHANGE_APPROVED = 'playlist_change_approved',
   PLAYLIST_CHANGE_REJECTED = 'playlist_change_rejected',
+  PLAYLIST_CHANGE_CANCELLED = 'playlist_change_cancelled',
+  PLAYLIST_CHANGE_EXPIRED = 'playlist_change_expired',
   SMART_PLAYLIST_REFRESHED = 'smart_playlist_refreshed',
 }
 

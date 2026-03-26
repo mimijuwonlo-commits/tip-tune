@@ -14,17 +14,21 @@ export enum PlaylistChangeAction {
   ADD_TRACK = 'add_track',
   REMOVE_TRACK = 'remove_track',
   REORDER_TRACKS = 'reorder_tracks',
+  UPDATE_METADATA = 'update_metadata',
 }
 
 export enum PlaylistChangeStatus {
   PENDING = 'pending',
   APPROVED = 'approved',
   REJECTED = 'rejected',
+  EXPIRED = 'expired',
+  CANCELLED = 'cancelled',
 }
 
 @Entity('playlist_change_requests')
 @Index(['playlistId', 'status'])
 @Index(['requestedById'])
+@Index(['createdAt'])
 export class PlaylistChangeRequest {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -51,14 +55,26 @@ export class PlaylistChangeRequest {
   })
   status: PlaylistChangeStatus;
 
+  @Column({ type: 'text', nullable: true })
+  rejectionReason: string | null;
+
   @Column({ type: 'uuid', name: 'reviewed_by_id', nullable: true })
   reviewedById: string | null;
 
   @Column({ type: 'timestamp', name: 'reviewed_at', nullable: true })
   reviewedAt: Date | null;
 
+  @Column({ type: 'timestamp', name: 'expires_at', nullable: true })
+  expiresAt: Date | null;
+
+  @Column({ type: 'timestamp', name: 'cancelled_at', nullable: true })
+  cancelledAt: Date | null;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
+
+  @Column({ type: 'timestamp', name: 'updated_at', default: () => 'CURRENT_TIMESTAMP' })
+  updatedAt: Date;
 
   @ManyToOne(() => Playlist, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'playlistId' })

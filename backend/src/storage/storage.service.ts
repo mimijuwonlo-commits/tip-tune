@@ -4,6 +4,8 @@ import { v4 as uuidv4 } from 'uuid';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import * as mime from 'mime-types';
+import { createReadStream } from 'fs';
+import { pipeline } from 'stream/promises';
 
 /** Rejection reason codes returned to clients. */
 export enum UploadRejectionCode {
@@ -77,9 +79,10 @@ export class StorageService {
 
   /**
    * Comprehensive file validation pipeline.
-   * Checks: empty file, MIME whitelist, size limit, extension match, magic bytes.
+   * Checks: empty file, MIME whitelist, size limit, extension match, magic bytes,
+   * filename security, and content sniffing.
    */
-  validateFile(file: Express.Multer.File): void {
+  async validateFile(file: Express.Multer.File): Promise<void> {
     // Reject empty files
     if (!file.buffer || file.size === 0) {
       throw new BadRequestException({
@@ -88,16 +91,27 @@ export class StorageService {
       });
     }
 
-    // Reject invalid filenames (path traversal, null bytes)
+    // Reject invalid filenames (path traversal, null bytes, special chars)
     if (
       !file.originalname ||
       file.originalname.includes('\0') ||
       file.originalname.includes('..') ||
-      /[<>:"|?*]/.test(file.originalname)
+      /[<>:"|?*]/.test(file.originalname) ||
+      file.originalname.trim() !== file.originalname ||
+      file.originalname.length > 255
     ) {
       throw new BadRequestException({
         code: UploadRejectionCode.FILENAME_INVALID,
-        message: 'Filename contains invalid characters',
+        message: 'Filename contains invalid characters or is too long',
+      });
+    }
+
+    // Normalize and sanitize filename
+    const sanitizedName = this.sanitizeFilename(file.originalname);
+    if (!sanitizedName || sanitizedName.length === 0) {
+      throw new BadRequestException({
+        code: UploadRejectionCode.FILENAME_INVALID,
+        message: 'Invalid filename after sanitization',
       });
     }
 
@@ -109,8 +123,8 @@ export class StorageService {
       });
     }
 
-    // File size limit
-    if (file.size > this.maxFileSize) {
+    // File size limit with stricter check
+    if (file.size <= 0 || file.size > this.maxFileSize) {
       throw new BadRequestException({
         code: UploadRejectionCode.FILE_TOO_LARGE,
         message: `File size ${(file.size / (1024 * 1024)).toFixed(1)}MB exceeds limit of ${(this.maxFileSize / (1024 * 1024)).toFixed(0)}MB`,
@@ -118,7 +132,7 @@ export class StorageService {
     }
 
     // Extension must match declared MIME type
-    const ext = path.extname(file.originalname).toLowerCase();
+    const ext = path.extname(sanitizedName).toLowerCase();
     const allowedExts = MIME_TO_EXTENSIONS[file.mimetype];
     if (allowedExts && !allowedExts.includes(ext)) {
       throw new BadRequestException({
@@ -127,8 +141,8 @@ export class StorageService {
       });
     }
 
-    // Magic byte verification
-    if (!this.verifyMagicBytes(file.buffer, file.mimetype)) {
+    // Magic byte verification (content sniffing)
+    if (!await this.verifyMagicBytesAdvanced(file.buffer, file.mimetype)) {
       throw new BadRequestException({
         code: UploadRejectionCode.SUSPICIOUS_CONTENT,
         message:
@@ -139,20 +153,111 @@ export class StorageService {
 
   /**
    * Verify that the file buffer starts with the expected magic bytes
-   * for the declared MIME type.
+   * for the declared MIME type. Enhanced version checks multiple offsets
+   * and validates file structure integrity.
    */
-  private verifyMagicBytes(buffer: Buffer, mimeType: string): boolean {
+  private async verifyMagicBytesAdvanced(buffer: Buffer, mimeType: string): Promise<boolean> {
     const signatures = MAGIC_BYTES[mimeType];
     if (!signatures || signatures.length === 0) {
       return true; // No signature to check
     }
 
-    return signatures.some((sig) => {
+    // Check if any signature matches
+    const hasValidSignature = signatures.some((sig) => {
       if (buffer.length < sig.offset + sig.bytes.length) return false;
       return sig.bytes.every(
         (byte, i) => buffer[sig.offset + i] === byte,
       );
     });
+
+    if (!hasValidSignature) {
+      return false;
+    }
+
+    // Additional integrity checks for specific formats
+    if (mimeType === 'audio/mpeg') {
+      return this.validateMP3Structure(buffer);
+    } else if (mimeType === 'audio/wav') {
+      return this.validateWAVStructure(buffer);
+    } else if (mimeType === 'audio/flac' || mimeType === 'audio/x-flac') {
+      return this.validateFLACStructure(buffer);
+    }
+
+    return true;
+  }
+
+  /**
+   * Validate MP3 file structure integrity
+   */
+  private validateMP3Structure(buffer: Buffer): boolean {
+    // Check for minimum viable MP3 size
+    if (buffer.length < 128) return false;
+
+    // Check for ID3v2 header size validity if present
+    if (buffer[0] === 0x49 && buffer[1] === 0x44 && buffer[2] === 0x33) {
+      // ID3v2 tag present - check tag size is reasonable
+      const tagSize = ((buffer[6] & 0x7f) << 21) | 
+                      ((buffer[7] & 0x7f) << 14) | 
+                      ((buffer[8] & 0x7f) << 7) | 
+                      (buffer[9] & 0x7f);
+      if (tagSize + 10 > buffer.length) return false;
+    }
+
+    return true;
+  }
+
+  /**
+   * Validate WAV file structure integrity
+   */
+  private validateWAVStructure(buffer: Buffer): boolean {
+    // Minimum WAV file size (44 bytes for header + some data)
+    if (buffer.length < 44) return false;
+
+    // Check RIFF header
+    if (buffer.toString('ascii', 0, 4) !== 'RIFF') return false;
+    
+    // Check WAVE format
+    if (buffer.toString('ascii', 8, 12) !== 'WAVE') return false;
+
+    return true;
+  }
+
+  /**
+   * Validate FLAC file structure integrity
+   */
+  private validateFLACStructure(buffer: Buffer): boolean {
+    // Minimum FLAC file size
+    if (buffer.length < 42) return false;
+
+    // Check fLaC marker
+    if (buffer.toString('ascii', 0, 4) !== 'fLaC') return false;
+
+    return true;
+  }
+
+  /**
+   * Sanitize filename to prevent directory traversal and injection attacks
+   */
+  private sanitizeFilename(filename: string): string {
+    // Remove null bytes and trim
+    let sanitized = filename.replace(/\0/g, '').trim();
+    
+    // Remove path components
+    sanitized = path.basename(sanitized);
+    
+    // Replace dangerous characters with underscores
+    sanitized = sanitized.replace(/[<>:"|?*]/g, '_');
+    
+    // Remove leading/trailing dots and spaces
+    sanitized = sanitized.replace(/^[.\s]+|[.\s]+$/g, '');
+    
+    // Limit length
+    if (sanitized.length > 200) {
+      const ext = path.extname(sanitized);
+      sanitized = sanitized.substring(0, 200 - ext.length) + ext;
+    }
+    
+    return sanitized;
   }
 
   generateUniqueFileName(originalName: string): string {
@@ -165,13 +270,14 @@ export class StorageService {
   async saveFile(
     file: Express.Multer.File,
   ): Promise<{ filename: string; path: string; url: string }> {
-    this.validateFile(file);
+    await this.validateFile(file);
 
     const filename = this.generateUniqueFileName(file.originalname);
     const filePath = path.join(this.uploadDir, filename);
 
     try {
-      await fs.writeFile(filePath, file.buffer);
+      // Write file with proper flags to prevent overwriting
+      await fs.writeFile(filePath, file.buffer, { flag: 'wx' });
 
       const url = `/api/files/${filename}`;
 
@@ -184,6 +290,14 @@ export class StorageService {
       };
     } catch (error) {
       this.logger.error(`Failed to save file: ${error.message}`);
+      
+      // Clean up partial writes
+      try {
+        await fs.unlink(filePath);
+      } catch (cleanupError) {
+        // Ignore cleanup errors
+      }
+      
       throw new BadRequestException('Failed to save file');
     }
   }

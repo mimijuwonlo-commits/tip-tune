@@ -1,11 +1,6 @@
-import {
-  Injectable,
-  NotFoundException,
-  BadRequestException,
-  ConflictException,
-  ForbiddenException,
-} from "@nestjs/common";
+import { Injectable, NotFoundException, BadRequestException, ConflictException, ForbiddenException, Logger } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
+import { Cron, CronExpression } from "@nestjs/schedule";
 import {
   Repository,
   DataSource,
@@ -14,8 +9,10 @@ import {
   LessThanOrEqual,
   MoreThanOrEqual,
   Between,
+  IsNull,
+  Not,
 } from "typeorm";
-import { ArtistEvent } from "./artist-event.entity";
+import { ArtistEvent, EventStatus } from "./artist-event.entity";
 import { EventRSVP } from "./event-rsvp.entity";
 import {
   CreateArtistEventDto,
@@ -34,6 +31,10 @@ export interface PaginatedResult<T> {
 
 @Injectable()
 export class EventsService {
+  private readonly logger = new Logger(EventsService.name);
+  private readonly LIVE_TRANSITION_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+  private readonly ENDED_TRANSITION_DELAY_MS = 30 * 60 * 1000; // 30 minutes after end time
+
   constructor(
     @InjectRepository(ArtistEvent)
     private readonly eventRepo: Repository<ArtistEvent>,
@@ -250,5 +251,192 @@ export class EventsService {
 
   async markReminderSent(eventId: string): Promise<void> {
     await this.eventRepo.update(eventId, { reminderSent: true });
+  }
+
+  // ─── LIFECYCLE AUTOMATION ───────────────────────────────────────────────────
+
+  /**
+   * Cron job to automatically transition event states
+   * Runs every 5 minutes to check for events needing state changes
+   */
+  @Cron(CronExpression.EVERY_5_MINUTES)
+  async automateEventLifecycle(): Promise<void> {
+    this.logger.log("Automating event lifecycle transitions...");
+
+    try {
+      // Transition upcoming events to LIVE
+      const liveCount = await this.transitionUpcomingToLive();
+      
+      // Transition live events to ENDED
+      const endedCount = await this.transitionLiveToEnded();
+      
+      // Clean up old events
+      const cleanupCount = await this.cleanupOldEvents();
+
+      this.logger.log(
+        `Lifecycle automation complete: ${liveCount}→LIVE, ${endedCount}→ENDED, ${cleanupCount} cleaned`,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Error in event lifecycle automation: ${error.message}`,
+      );
+    }
+  }
+
+  /**
+   * Transition upcoming events to LIVE status
+   * Events become LIVE within a window around their start time
+   */
+  async transitionUpcomingToLive(): Promise<number> {
+    const now = new Date();
+    const windowStart = new Date(
+      now.getTime() - this.LIVE_TRANSITION_WINDOW_MS,
+    );
+    const windowEnd = new Date(
+      now.getTime() + this.LIVE_TRANSITION_WINDOW_MS,
+    );
+
+    const upcomingEvents = await this.eventRepo.find({
+      where: {
+        status: EventStatus.UPCOMING,
+        startTime: Between(windowStart, windowEnd),
+      },
+    });
+
+    if (upcomingEvents.length === 0) {
+      return 0;
+    }
+
+    for (const event of upcomingEvents) {
+      try {
+        await this.eventRepo.update(event.id, {
+          status: EventStatus.LIVE,
+          wentLiveAt: new Date(),
+        });
+
+        this.logger.log(`Event ${event.id} (${event.title}) transitioned to LIVE`);
+
+        // TODO: Send notifications to RSVP attendees that event is now live
+        // await this.notifyAttendeesEventIsLive(event);
+      } catch (error) {
+        this.logger.error(
+          `Failed to transition event ${event.id} to LIVE: ${error.message}`,
+        );
+      }
+    }
+
+    return upcomingEvents.length;
+  }
+
+  /**
+   * Transition live events to ENDED status
+   * Events end after their end time (or start time if no end time) plus a delay
+   */
+  async transitionLiveToEnded(): Promise<number> {
+    const now = new Date();
+    const thresholdTime = new Date(
+      now.getTime() - this.ENDED_TRANSITION_DELAY_MS,
+    );
+
+    // Find live events that should have ended
+    const liveEvents = await this.eventRepo.find({
+      where: [
+        {
+          status: EventStatus.LIVE,
+          endTime: LessThanOrEqual(thresholdTime),
+        },
+        {
+          status: EventStatus.LIVE,
+          endTime: IsNull(),
+          startTime: LessThanOrEqual(thresholdTime),
+        },
+      ],
+    });
+
+    if (liveEvents.length === 0) {
+      return 0;
+    }
+
+    for (const event of liveEvents) {
+      try {
+        await this.eventRepo.update(event.id, {
+          status: EventStatus.ENDED,
+          endedAt: new Date(),
+        });
+
+        this.logger.log(`Event ${event.id} (${event.title}) transitioned to ENDED`);
+
+        // TODO: Send follow-up notifications or feedback requests
+        // await this.notifyAttendeesEventEnded(event);
+      } catch (error) {
+        this.logger.error(
+          `Failed to transition event ${event.id} to ENDED: ${error.message}`,
+        );
+      }
+    }
+
+    return liveEvents.length;
+  }
+
+  /**
+   * Clean up old events (archive or soft-delete based on age)
+   * Prevents database bloat from historical events
+   */
+  async cleanupOldEvents(daysOld: number = 90): Promise<number> {
+    const cutoffDate = new Date(
+      Date.now() - daysOld * 24 * 60 * 60 * 1000,
+    );
+
+    const oldEvents = await this.eventRepo.find({
+      where: {
+        status: EventStatus.ENDED,
+        endedAt: LessThanOrEqual(cutoffDate),
+      },
+      take: 100, // Limit to prevent performance issues
+    });
+
+    if (oldEvents.length === 0) {
+      return 0;
+    }
+
+    // For now, just log - could implement soft delete or archival
+    this.logger.log(
+      `Found ${oldEvents.length} events older than ${daysOld} days for cleanup`,
+    );
+
+    // TODO: Implement archival strategy based on business requirements
+    // Options: soft delete, move to archive table, compress data, etc.
+
+    return oldEvents.length;
+  }
+
+  /**
+   * Manually cancel an event (admin/owner action)
+   */
+  async cancelEvent(eventId: string, userId: string): Promise<ArtistEvent> {
+    const event = await this.findOne(eventId);
+
+    // Verify ownership (would need artist validation here)
+    // For now, assuming caller has permission
+
+    if (
+      event.status === EventStatus.ENDED ||
+      event.status === EventStatus.CANCELLED
+    ) {
+      throw new BadRequestException(
+        "Cannot cancel an already ended or cancelled event",
+      );
+    }
+
+    await this.eventRepo.update(eventId, {
+      status: EventStatus.CANCELLED,
+    });
+
+    this.logger.log(`Event ${eventId} manually cancelled`);
+
+    // TODO: Notify all RSVP attendees about cancellation
+    // await this.notifyAttendeesEventCancelled(event);
+
+    return this.findOne(eventId);
   }
 }
