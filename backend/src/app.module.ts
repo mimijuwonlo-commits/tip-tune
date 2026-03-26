@@ -34,6 +34,7 @@ import { MetricsModule } from "./metrics/metrics.module";
 import { HealthModule } from "./health/health.module";
 import { VersionModule } from "./version/version.module";
 import { ArtistStatusModule } from "./artist-status/artist-status.module";
+import { WebSocketModule } from "./websocket/websocket.module";
 import { CustomThrottlerRedisStorage } from "./custom-throttler-storage-redis";
 import { VaryAcceptEncodingMiddleware } from "./common/middleware/vary-accept-encoding.middleware";
 
@@ -107,6 +108,7 @@ import { VaryAcceptEncodingMiddleware } from "./common/middleware/vary-accept-en
     HealthModule,
     VersionModule,
     ArtistStatusModule,
+    WebSocketModule,
   ],
   controllers: [],
   providers: [
