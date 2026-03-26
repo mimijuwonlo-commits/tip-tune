@@ -4,4 +4,4 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-soroban-sdk = "0.7.0"  # ensure latest Soroban SDK
+soroban-sdk = { version = "21.7.0", features = ["alloc"] }
