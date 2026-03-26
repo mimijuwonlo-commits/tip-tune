@@ -1,6 +1,6 @@
 import * as compression from 'compression';
 import * as zlib from 'zlib';
-import { Request, Response } from 'express';
+import { Request, Response, RequestHandler } from 'express';
 
 type BinaryEndpointRule = {
   method: string;
@@ -30,7 +30,7 @@ export function shouldCompress(req: Request, res: Response): boolean {
   return compression.filter(req as any, res as any);
 }
 
-export function createCompressionMiddleware() {
+export function createCompressionMiddleware(): RequestHandler {
   return compression({
     threshold: 1024,
     filter: shouldCompress as compression.CompressionFilter,

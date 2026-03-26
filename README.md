@@ -18,16 +18,16 @@ TipTune is a revolutionary platform that connects music lovers directly with art
 
 ---
 
-##  Features
+## Features
 
--  **Stream Music** - Listen to tracks from independent artists
+- **Stream Music** - Listen to tracks from independent artists
 - **Instant Tips** - Send XLM or USDC tips with one tap
--  **Live Notifications** - Artists see tips in real-time during performances
--  **Micro-transactions** - Tips as low as $0.10 thanks to Stellar's low fees
--  **Global Reach** - Borderless payments to artists anywhere
--  **Artist Dashboard** - Track earnings, top supporters, and engagement
+- **Live Notifications** - Artists see tips in real-time during performances
+- **Micro-transactions** - Tips as low as $0.10 thanks to Stellar's low fees
+- **Global Reach** - Borderless payments to artists anywhere
+- **Artist Dashboard** - Track earnings, top supporters, and engagement
 - **Artist Profiles** - Showcase music, bio, and tip history
--  **Secure Wallet Integration** - Connect with Freighter, Albedo, or other Stellar wallets
+- **Secure Wallet Integration** - Connect with Freighter, Albedo, or other Stellar wallets
 
 ---
 
@@ -42,16 +42,39 @@ Traditional music streaming pays artists fractions of a cent per stream. TipTune
 
 ---
 
-##  Tech Stack
+## Tech Stack
 
 - **Frontend**: React, TypeScript, TailwindCSS
 - **Blockchain**: Stellar Network
 - **Smart Contracts**: Soroban (Stellar's smart contract platform)
 - **Wallet Integration**: Freighter, Albedo, xBull
-- **Backend**: Node.js, Express
-- **Database**: PostgreSQL
+- **Backend**: Node.js, NestJS
+- **Database**: PostgreSQL (with `pg_trgm` full-text + fuzzy search)
 - **Audio Streaming**: Web Audio API / HowlerJS
 - **Real-time**: WebSockets for live notifications
+
+---
+
+## 🔍 Search Ranking Algorithm
+
+TipTune's autocomplete rankings are driven by a **composite mathematical scoring function** — not alphabetical order or raw counts. The algorithm is inspired by industry-proven ranking systems:
+
+```
+Score(item) = PrefixBoost
+            + log(1 + plays)  × 1.0   ← log-normalized, zero-safe
+            + log(1 + tips)   × 3.0   ← tips weighted 3× (financial intent)
+            + e^(-0.02 × days) × 2.0  ← exponential recency decay (t½ ≈ 34.6 days)
+```
+
+| Signal | Technique | Industry Reference |
+| :----- | :-------- | :----------------- |
+| Engagement | `Math.log1p(n)` — log normalization | Reddit "Hot" algorithm |
+| Recency | `e^(-λt)`, λ=0.02, t½≈34.6 days | Hacker News gravity model |
+| Prefix match | +100 flat boost (categorical gate) | Standard autocomplete UX research |
+| Tie-breaking | `localeCompare` — stable, locale-aware | Linux kernel style: pick a rule, enforce it |
+
+**Full documentation:** [`docs/search-ranking-algorithm.md`](docs/search-ranking-algorithm.md)
+**Unit tests (15/15 passing):** [`frontend/src/utils/searchRanking.test.ts`](frontend/src/utils/searchRanking.test.ts)
 
 ---
 
@@ -376,9 +399,10 @@ tiptune/
 └── docker-compose.yml                  # Docker setup for PostgreSQL
 ```
 
-## Key Features of This Structure:
+## Key Features of This Structure
 
 ### Backend (NestJS + TypeORM + PostgreSQL)
+
 ✅ **Module-based architecture** - Each feature is a separate module
 ✅ **Entities folder** - TypeORM entities for database models
 ✅ **DTOs folder** - Data Transfer Objects for validation
@@ -387,6 +411,7 @@ tiptune/
 ✅ **Migrations** - Database version control with TypeORM
 
 ### Frontend (React + TypeScript + Vite)
+
 ✅ **Component-based** - Organized by feature
 ✅ **Contexts** - Global state management
 ✅ **Services** - API calls separated from components
@@ -404,7 +429,7 @@ We welcome contributions! TipTune is participating in the **Stellar Drips Wave P
 1. Check out our [CONTRIBUTING.md](CONTRIBUTING.md) guide
 2. Browse [open issues](https://github.com/OlufunbiIK/tiptune/issues) tagged with `good-first-issue`
 3. Read the [Code of Conduct](CODE_OF_CONDUCT.md)
-4. Join our [Discord community] https://discord.gg/tkbwMmJE
+4. Join our [Discord community] <https://discord.gg/tkbwMmJE>
 
 ### Development Workflow
 
@@ -420,6 +445,7 @@ We welcome contributions! TipTune is participating in the **Stellar Drips Wave P
 ## 🎵 Roadmap
 
 ### Phase 1: MVP (Current)
+
 - [x] Basic music player
 - [x] Wallet connection
 - [x] Simple tipping functionality
@@ -427,6 +453,7 @@ We welcome contributions! TipTune is participating in the **Stellar Drips Wave P
 - [ ] Real-time notifications
 
 ### Phase 2: Enhanced Features
+
 - [ ] Playlist creation
 - [ ] Social features (comments, likes)
 - [ ] Artist analytics dashboard
@@ -434,6 +461,7 @@ We welcome contributions! TipTune is participating in the **Stellar Drips Wave P
 - [ ] Mobile app (React Native)
 
 ### Phase 3: Advanced
+
 - [ ] NFT integration (collectible releases)
 - [ ] Live streaming with tips
 - [ ] Subscription tiers
@@ -469,15 +497,15 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Contact & Community
 
-
 - **Discord**: [[Join our community] https://discord.gg/tkbwMmJE
-- **Email**: hello@tiptune.io
+- **Email**: <hello@tiptune.io>
 
 ---
 
 ## 💡 Support the Project
 
 If you find TipTune valuable, consider:
+
 - Starring this repository
 - Reporting bugs and suggesting features
 - Contributing code or documentation
