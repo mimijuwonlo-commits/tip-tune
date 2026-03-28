@@ -9,12 +9,15 @@ use soroban_sdk::{
 #[repr(u32)]
 pub enum Error {
     InvalidPercentage = 1,
-    TotalExceeds100 = 2,
+    TotalExceeds10000 = 2,
     TrackNotFound = 3,
     InvalidAmount = 4,
     NoCollaborators = 5,
-    InvalidAsset = 6,    Overflow = 7,          // Amount overflow in distribution
-    Underflow = 8,         // Amount underflow in distribution}
+    InvalidAsset = 6,
+    Overflow = 7,
+    Underflow = 8,
+    AlreadySettled = 9,
+}
 
 /// Represents a supported asset type
 #[contracttype]
@@ -29,7 +32,7 @@ pub enum Asset {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Collaborator {
     pub address: Address,
-    pub percentage: u32, // Basis points (100 = 1%, 10000 = 100%)
+    pub percentage: u32, // Basis points (10000 = 100%)
 }
 
 /// Distribution record for a single payout
@@ -37,6 +40,7 @@ pub struct Collaborator {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DistributionRecord {
     pub track_id: String,
+    pub payout_id: String,
     pub total_amount: i128,
     pub asset: Asset,
     pub distributions: Vec<(Address, i128)>,
@@ -47,8 +51,10 @@ pub struct DistributionRecord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     TrackSplits(String),
-    DistributionLog(String),
-    DistributionCount,
+    DistributionLog(String, u32), // track_id, index
+    LogCount(String),             // track_id -> count
+    GlobalLogCount,               // total distributions
+    Settled(String),              // payout_id -> bool
 }
 
 #[contract]
@@ -75,7 +81,7 @@ impl AutoRoyaltyDistribution {
         }
 
         if total > 10000 {
-            return Err(Error::TotalExceeds100);
+            return Err(Error::TotalExceeds10000);
         }
 
         env.storage()
@@ -97,14 +103,19 @@ impl AutoRoyaltyDistribution {
     }
 
     /// Receive a tip/royalty and automatically distribute it among collaborators.
-    /// Handles rounding by giving remainder to the first collaborator (no loss).
-    /// Uses checked arithmetic to prevent overflow/underflow.
+    /// Includes payout_id for duplicate prevention.
     pub fn receive_and_distribute(
         env: Env,
         track_id: String,
+        payout_id: String,
         amount: i128,
         asset: Asset,
     ) -> Result<Vec<(Address, i128)>, Error> {
+        // Duplicate prevention
+        if env.storage().persistent().has(&DataKey::Settled(payout_id.clone())) {
+            return Err(Error::AlreadySettled);
+        }
+
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
@@ -117,83 +128,82 @@ impl AutoRoyaltyDistribution {
 
         let mut distributions: Vec<(Address, i128)> = Vec::new(&env);
         let mut distributed: i128 = 0;
+        let count = collaborators.len();
 
-        // Calculate each collaborator's share using checked arithmetic
-        for i in 0..collaborators.len() {
+        for i in 0..count {
             let collab = collaborators.get(i).unwrap();
-            // Use checked_mul and checked_div to prevent overflow
-            let share = amount
-                .checked_mul(collab.percentage as i128)
-                .ok_or(Error::Overflow)?
-                .checked_div(10000)
-                .ok_or(Error::Overflow)?;
+            
+            let share = if i == (count - 1) {
+                // Last collaborator gets the remainder
+                amount.checked_sub(distributed).ok_or(Error::Underflow)?
+            } else {
+                amount
+                    .checked_mul(collab.percentage as i128)
+                    .ok_or(Error::Overflow)?
+                    .checked_div(10000)
+                    .ok_or(Error::Overflow)?
+            };
+
             distributions.push_back((collab.address.clone(), share));
             distributed = distributed
                 .checked_add(share)
                 .ok_or(Error::Overflow)?;
         }
 
-        // Handle rounding remainder — give it to the first collaborator to prevent loss
-        let remainder = amount
-            .checked_sub(distributed)
-            .ok_or(Error::Underflow)?;
-        if remainder > 0 && !distributions.is_empty() {
-            let first = distributions.get(0).unwrap();
-            let new_first_share = first
-                .1
-                .checked_add(remainder)
-                .ok_or(Error::Overflow)?;
-            distributions.set(0, (first.0, new_first_share));
-        }
+        // Mark as settled
+        env.storage().persistent().set(&DataKey::Settled(payout_id.clone()), &true);
 
-        // Log the distribution
+        // Record history
         let record = DistributionRecord {
             track_id: track_id.clone(),
+            payout_id: payout_id.clone(),
             total_amount: amount,
             asset: asset.clone(),
             distributions: distributions.clone(),
             timestamp: env.ledger().timestamp(),
         };
 
-        let count: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::DistributionCount)
-            .unwrap_or(0);
-        let new_count = count
-            .checked_add(1)
-            .ok_or(Error::Overflow)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::DistributionCount, &new_count);
+        let log_idx: u32 = env.storage().persistent().get(&DataKey::LogCount(track_id.clone())).unwrap_or(0);
+        env.storage().persistent().set(&DataKey::DistributionLog(track_id.clone(), log_idx), &record);
+        env.storage().persistent().set(&DataKey::LogCount(track_id.clone()), &(log_idx + 1));
+
+        let global_count: u64 = env.storage().instance().get(&DataKey::GlobalLogCount).unwrap_or(0);
+        env.storage().instance().set(&DataKey::GlobalLogCount, &(global_count + 1));
 
         // Emit distribution event
         env.events()
-            .publish((symbol_short!("royalty"), symbol_short!("dist")), record);
+            .publish((symbol_short!("royalty"), symbol_short!("dist"), payout_id), record);
 
         Ok(distributions)
     }
 
-    /// Batch distribute royalties for multiple tracks at once (gas optimization).
+    /// Batch distribute royalties for multiple tracks.
+    /// Returns a vector of results for each distribution attempt.
     pub fn batch_distribute(
         env: Env,
-        distributions: Vec<(String, i128, Asset)>,
-    ) -> Result<(), Error> {
+        distributions: Vec<(String, String, i128, Asset)>,
+    ) -> Vec<bool> {
+        let mut results = Vec::new(&env);
         for dist in distributions.iter() {
-            let (track_id, amount, asset) = dist;
-            Self::receive_and_distribute(env.clone(), track_id, amount, asset)?;
+            let (track_id, payout_id, amount, asset) = dist;
+            match Self::receive_and_distribute(env.clone(), track_id, payout_id, amount, asset) {
+                Ok(_) => results.push_back(true),
+                Err(_) => results.push_back(false),
+            }
         }
-
-        Ok(())
+        results
     }
 
-    /// Get the total number of distributions processed
-    pub fn get_distribution_count(env: Env) -> u64 {
-        env.storage()
-            .instance()
-            .get(&DataKey::DistributionCount)
-            .unwrap_or(0)
+    /// Query settlement result for a specific track and index
+    pub fn get_settlement_history(env: Env, track_id: String, index: u32) -> Option<DistributionRecord> {
+        env.storage().persistent().get(&DataKey::DistributionLog(track_id, index))
+    }
+
+    /// Get total settlement count for a track
+    pub fn get_settlement_count(env: Env, track_id: String) -> u32 {
+        env.storage().persistent().get(&DataKey::LogCount(track_id)).unwrap_or(0)
     }
 }
 
 mod test;
+;

@@ -375,6 +375,9 @@ impl MultisigContract {
         // Record approval.
         proposal.approvals.push_back(approver.clone());
 
+        // Recalculate valid approvals (only those still whitelisted)
+        let valid_count = Self::count_valid_approvals(&env, &proposal.approvals);
+
         env.events().publish(
             (symbol_short!("TIP"), symbol_short!("APPROVE")),
             TipActionEvent::new(
@@ -385,15 +388,15 @@ impl MultisigContract {
                 proposal.artist.clone(),
                 proposal.amount,
                 Some(proposal.required_sigs),
-                Some(proposal.approvals.len()),
+                Some(valid_count),
                 approver.clone(),
                 "PENDING",
                 Some(proposal.expires_at),
             ),
         );
 
-        // Check if threshold is met.
-        if proposal.approvals.len() >= proposal.required_sigs {
+        // Check if threshold is met using ONLY valid approvals.
+        if valid_count >= proposal.required_sigs {
             // Execute the tip — transfer to artist.
             let token = Self::get_token(&env);
             let token_client = token::Client::new(&env, &token);
@@ -418,7 +421,7 @@ impl MultisigContract {
                     proposal.artist.clone(),
                     proposal.amount,
                     Some(proposal.required_sigs),
-                    Some(proposal.approvals.len()),
+                    Some(valid_count),
                     approver.clone(),
                     "EXECUTED",
                     Some(proposal.expires_at),
@@ -433,6 +436,37 @@ impl MultisigContract {
             .persistent()
             .set(&DataKey::Tip(tip_id), &proposal);
         Ok(false)
+    }
+
+    /// Get number of valid approvals currently on a tip.
+    pub fn get_valid_approvals_count(env: Env, tip_id: String) -> u32 {
+        if let Some(p) = env.storage().persistent().get::<DataKey, TipProposal>(&DataKey::Tip(tip_id)) {
+            Self::count_valid_approvals(&env, &p.approvals)
+        } else {
+            0
+        }
+    }
+
+    /// Check if an address is a whitelisted signer.
+    pub fn is_signer(env: Env, signer: Address) -> bool {
+        Self::assert_whitelisted(&env, &signer).is_ok()
+    }
+
+    // ── Internal Helpers ─────────────────────────────────────────────────────
+
+    fn count_valid_approvals(env: &Env, approvals: &Vec<Address>) -> u32 {
+        let signers: Vec<Address> = env.storage().instance().get(&DataKey::Signers).unwrap_or_else(|| Vec::new(env));
+        let mut count = 0;
+        for i in 0..approvals.len() {
+            let app = approvals.get(i).unwrap();
+            for j in 0..signers.len() {
+                if signers.get(j).unwrap() == app {
+                    count += 1;
+                    break;
+                }
+            }
+        }
+        count
     }
 
     // ── Cancellation ─────────────────────────────────────────────────────────
