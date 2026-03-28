@@ -31,7 +31,7 @@ import {
 import { RecordPlayDto } from "./record-play.dto";
 
 @ApiTags("plays")
-@Controller("api/plays")
+@Controller("plays")
 export class PlayCountController {
   constructor(private readonly playCountService: PlayCountService) {}
 

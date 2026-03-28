@@ -1,8 +1,14 @@
-import { Injectable, Logger, BadRequestException } from "@nestjs/common";
+import {
+  Injectable,
+  Logger,
+  BadRequestException,
+  NotFoundException,
+} from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
 import { Repository, MoreThan, DataSource } from "typeorm";
 import * as crypto from "crypto";
 import { PlaySource, TrackPlay } from "./track-play.entity";
+import { TrackPlayedEvent } from "../tracks/events/track-played.event";
 import {
   ArtistOverviewDto,
   RecordPlayResponseDto,
@@ -12,6 +18,8 @@ import {
   TrackStatsDto,
 } from "./play-count-response.dto";
 import { RecordPlayDto } from "./record-play.dto";
+import { EventEmitter2 } from "@nestjs/event-emitter";
+import { Track } from "../tracks/entities/track.entity";
 
 export const MINIMUM_LISTEN_SECONDS = 30;
 export const DEDUP_WINDOW_HOURS = 1;
@@ -23,7 +31,10 @@ export class PlayCountService {
   constructor(
     @InjectRepository(TrackPlay)
     private readonly trackPlayRepo: Repository<TrackPlay>,
+    @InjectRepository(Track)
+    private readonly trackRepository: Repository<Track>,
     private readonly dataSource: DataSource,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -134,19 +145,30 @@ export class PlayCountService {
 
     // Mark as a genuine counted play and update Track.plays atomically
     play.countedAsPlay = true;
+    let artistId: string | null = null;
     await this.dataSource.transaction(async (manager) => {
       await manager.save(TrackPlay, play);
-      await manager
+      const updateResult = await manager
         .createQueryBuilder()
-        .update("tracks")
+        .update(Track)
         .set({ plays: () => "plays + 1" })
         .where("id = :id", { id: dto.trackId })
+        .returning(["artistId"])
         .execute();
+
+      artistId = updateResult.raw[0]?.artistId ?? null;
     });
 
     this.logger.log(
       `Counted play for track ${dto.trackId} by ${dto.userId ?? dto.sessionId}`,
     );
+
+    if (artistId) {
+      this.eventEmitter.emit(
+        "track.played",
+        new TrackPlayedEvent(dto.trackId, artistId, dto.userId ?? null),
+      );
+    }
 
     return {
       counted: true,
@@ -321,6 +343,29 @@ export class PlayCountService {
         completionRate: parseFloat(parseFloat(r.completionRate).toFixed(4)),
       })),
     };
+  }
+
+  async rebuildTrackPlayTotal(trackId: string): Promise<Track> {
+    const track = await this.trackRepository.findOne({
+      where: { id: trackId },
+    });
+    if (!track) {
+      throw new NotFoundException("Track not found");
+    }
+
+    const countedPlays = await this.trackPlayRepo.count({
+      where: { trackId, countedAsPlay: true },
+    });
+
+    await this.trackRepository.update(trackId, {
+      plays: countedPlays,
+      lastRecalculatedAt: new Date(),
+    });
+
+    return this.trackRepository.findOneOrFail({
+      where: { id: trackId },
+      relations: ["artist"],
+    });
   }
 
   // ─── Period Helper ────────────────────────────────────────────────────────

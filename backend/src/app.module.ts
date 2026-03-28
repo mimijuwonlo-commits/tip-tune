@@ -39,6 +39,9 @@ import { WebSocketModule } from "./websocket/websocket.module";
 import { CustomThrottlerRedisStorage } from "./custom-throttler-storage-redis";
 import { VaryAcceptEncodingMiddleware } from "./common/middleware/vary-accept-encoding.middleware";
 import { SubscriptionsModule } from "./subscription-tiers/subscriptions.module";
+import { PlayCountModule } from "./track-play-count/play-count.module";
+import { RecommendationsModule } from "./recommendations/recommendations.module";
+import { EmbedModule } from "./embed/embed.module";
 import { validate } from "./config/env.validation";
 
 @Module({
@@ -105,6 +108,7 @@ import { validate } from "./config/env.validation";
     // Queue module provides DLQ handling for exhausted jobs
     QueueModule,
     LeaderboardsModule,
+    PlayCountModule,
     ReportsModule,
     FeesModule,
     ModerationModule,
@@ -116,6 +120,8 @@ import { validate } from "./config/env.validation";
     ArtistStatusModule,
     WebSocketModule,
     SubscriptionsModule,
+    RecommendationsModule,
+    EmbedModule,
   ],
   controllers: [],
   providers: [

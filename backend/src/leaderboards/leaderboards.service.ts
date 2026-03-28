@@ -311,23 +311,23 @@ export class LeaderboardsService {
     }
 
     const results = await queryBuilder
-      .select("tip.fromUserId", "fromUserId")
+      .select("tip.fromUser", "fromUser")
       .addSelect("COALESCE(SUM(tip.amount), 0)", "totalAmount")
       .addSelect("COUNT(tip.id)", "tipCount")
-      .groupBy("tip.fromUserId")
+      .groupBy("tip.fromUser")
       .orderBy("totalAmount", "DESC")
       .limit(query.limit || 50)
       .offset(query.offset || 0)
       .getRawMany();
 
     return results.map((result, index) => ({
-      id: result.fromUserId,
+      id: result.fromUser,
       rank: (query.offset || 0) + index + 1,
       score: parseFloat(result.totalAmount || 0),
-      name: `User ${result.fromUserId.slice(0, 8)}`,
+      name: `User ${result.fromUser.slice(0, 8)}`,
       additionalData: {
         tipCount: parseInt(result.tipCount || 0),
-        userId: result.fromUserId,
+        userId: result.fromUser,
       },
     }));
   }
@@ -351,23 +351,23 @@ export class LeaderboardsService {
     }
 
     const results = await queryBuilder
-      .select("tip.fromUserId", "fromUserId")
+      .select("tip.fromUser", "fromUser")
       .addSelect("COUNT(tip.id)", "tipCount")
       .addSelect("COALESCE(SUM(tip.amount), 0)", "totalAmount")
-      .groupBy("tip.fromUserId")
+      .groupBy("tip.fromUser")
       .orderBy("tipCount", "DESC")
       .limit(query.limit || 50)
       .offset(query.offset || 0)
       .getRawMany();
 
     return results.map((result, index) => ({
-      id: result.fromUserId,
+      id: result.fromUser,
       rank: (query.offset || 0) + index + 1,
       score: parseInt(result.tipCount || 0),
-      name: `User ${result.fromUserId.slice(0, 8)}`,
+      name: `User ${result.fromUser.slice(0, 8)}`,
       additionalData: {
         totalAmount: parseFloat(result.totalAmount || 0),
-        userId: result.fromUserId,
+        userId: result.fromUser,
       },
     }));
   }
@@ -393,10 +393,10 @@ export class LeaderboardsService {
     // Get max tip per sender using subquery
     const subQuery = this.tipRepository
       .createQueryBuilder("tip2")
-      .select("tip2.senderAddress", "senderAddress")
+      .select("tip2.fromUser", "fromUser")
       .addSelect("MAX(tip2.amount)", "maxAmount")
       .where("tip2.status = :status", { status: TipStatus.VERIFIED })
-      .groupBy("tip2.senderAddress");
+      .groupBy("tip2.fromUser");
 
     if (query.timeframe !== Timeframe.ALL_TIME) {
       subQuery.andWhere("tip2.createdAt BETWEEN :start AND :end", {
@@ -412,7 +412,7 @@ export class LeaderboardsService {
       maxTips.map(async (maxTip) => {
         const tipQuery = this.tipRepository
           .createQueryBuilder("tip")
-          .where("tip.fromUserId = :userId", { userId: maxTip.fromUserId })
+          .where("tip.fromUser = :userId", { userId: maxTip.fromUser })
           .andWhere("tip.amount = :amount", { amount: maxTip.maxAmount })
           .andWhere("tip.status = :status", { status: TipStatus.VERIFIED })
           .orderBy("tip.createdAt", "DESC")
@@ -427,7 +427,7 @@ export class LeaderboardsService {
 
         const tip = await tipQuery.getOne();
         return {
-          fromUserId: maxTip.fromUserId,
+          fromUser: maxTip.fromUser,
           maxAmount: parseFloat(maxTip.maxAmount || 0),
           tipId: tip?.id,
           tipCreatedAt: tip?.createdAt,
@@ -440,14 +440,14 @@ export class LeaderboardsService {
     return results
       .slice(query.offset || 0, (query.offset || 0) + (query.limit || 50))
       .map((result, index) => ({
-        id: result.fromUserId,
+        id: result.fromUser,
         rank: (query.offset || 0) + index + 1,
         score: result.maxAmount,
-        name: `User ${result.fromUserId.slice(0, 8)}`,
+        name: `User ${result.fromUser.slice(0, 8)}`,
         additionalData: {
           tipId: result.tipId,
           tipDate: result.tipCreatedAt,
-          userId: result.fromUserId,
+          userId: result.fromUser,
         },
       }));
   }

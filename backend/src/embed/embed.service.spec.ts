@@ -1,89 +1,98 @@
-import { Test, TestingModule } from '@nestjs/testing';
-import { getRepositoryToken } from '@nestjs/typeorm';
-import { EmbedService } from './embed.service';
-import { EmbedView } from './entities/embed-view.entity';
+import { Test, TestingModule } from "@nestjs/testing";
+import { getRepositoryToken } from "@nestjs/typeorm";
+import { ForbiddenException } from "@nestjs/common";
+import { EmbedService } from "./embed.service";
+import { EmbedView } from "./entities/embed-view.entity";
+import { Track } from "../tracks/entities/track.entity";
 
-describe('EmbedService', () => {
+describe("EmbedService", () => {
   let service: EmbedService;
-  const mockRepo = {
-    save: jest.fn(),
-    find: jest.fn(),
-    createQueryBuilder: jest.fn(),
-  };
+  let embedRepo: jest.Mocked<any>;
+  let trackRepo: jest.Mocked<any>;
 
   beforeEach(async () => {
+    embedRepo = {
+      create: jest.fn((value) => value),
+      save: jest.fn(),
+      count: jest.fn(),
+      createQueryBuilder: jest.fn(() => ({
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        select: jest.fn().mockReturnThis(),
+        groupBy: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        limit: jest.fn().mockReturnThis(),
+        getRawMany: jest.fn().mockResolvedValue([]),
+      })),
+    };
+
+    trackRepo = {
+      findOne: jest.fn().mockResolvedValue({
+        id: "track-1",
+        title: "Track One",
+        artistId: "artist-1",
+        isPublic: true,
+        duration: 120,
+        audioUrl: "https://cdn.test/audio.mp3",
+        streamingUrl: "https://cdn.test/stream.m3u8",
+        coverArtUrl: "https://cdn.test/cover.jpg",
+        genre: "Afrobeats",
+        mimeType: "audio/mpeg",
+        artist: { artistName: "Artist One" },
+      }),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         EmbedService,
-        {
-          provide: getRepositoryToken(EmbedView),
-          useValue: mockRepo,
-        },
+        { provide: getRepositoryToken(EmbedView), useValue: embedRepo },
+        { provide: getRepositoryToken(Track), useValue: trackRepo },
       ],
     }).compile();
 
-    service = module.get<EmbedService>(EmbedService);
+    service = module.get(EmbedService);
   });
 
-  afterEach(() => jest.clearAllMocks());
-
-  describe('generateEmbedToken', () => {
-    it('should return a hex string', () => {
-      const token = service.generateEmbedToken('track-123');
-      expect(token).toMatch(/^[0-9a-f]{64}$/);
-    });
-
-    it('should generate different tokens for different tracks', () => {
-      const t1 = service.generateEmbedToken('track-1');
-      const t2 = service.generateEmbedToken('track-2');
-      expect(t1).not.toBe(t2);
-    });
+  it("generates verifiable time-bound embed tokens", () => {
+    const token = service.generateEmbedToken("track-1", 60);
+    expect(service.validateEmbedToken("track-1", token)).toBe(true);
+    expect(service.validateEmbedToken("track-2", token)).toBe(false);
   });
 
-  describe('getOEmbed', () => {
-    it('should return valid oEmbed JSON spec', () => {
-      const result = service.getOEmbed('track-123', 'https://example.com');
-      expect(result).toHaveProperty('type', 'rich');
-      expect(result).toHaveProperty('version', '1.0');
-      expect(result).toHaveProperty('provider_name');
-      expect(result).toHaveProperty('html');
-    });
+  it("returns schema-aligned player data for valid tokens", async () => {
+    const token = service.generateEmbedToken("track-1", 60);
+
+    await expect(service.getPlayerData("track-1", token)).resolves.toEqual(
+      expect.objectContaining({
+        trackId: "track-1",
+        coverArtUrl: "https://cdn.test/cover.jpg",
+        artist: "Artist One",
+      }),
+    );
   });
 
-  describe('getMetaTags', () => {
-    it('should include Open Graph tags', () => {
-      const result = service.getMetaTags('track-123', 'https://example.com');
-      expect(result).toHaveProperty('og:type');
-      expect(result).toHaveProperty('og:title');
-      expect(result).toHaveProperty('og:url');
-    });
-
-    it('should include Twitter Card tags', () => {
-      const result = service.getMetaTags('track-123', 'https://example.com');
-      expect(result).toHaveProperty('twitter:card');
-    });
+  it("rejects invalid tokens", async () => {
+    await expect(
+      service.getPlayerData("track-1", "bad-token"),
+    ).rejects.toBeInstanceOf(ForbiddenException);
   });
 
-  describe('recordView', () => {
-    it('should save an embed view record', async () => {
-      mockRepo.save.mockResolvedValue({ id: '1' });
+  it("records views using the database-backed rate limiter", async () => {
+    embedRepo.count.mockResolvedValue(0);
+    embedRepo.save.mockResolvedValue(undefined);
 
-      await service.recordView('track-123', 'https://blog.com/post', 'blog.com');
+    await service.recordView(
+      "track-1",
+      "https://blog.example/posts/1",
+      "https://blog.example",
+    );
 
-      expect(mockRepo.save).toHaveBeenCalledWith(
-        expect.objectContaining({
-          trackId: 'track-123',
-          referrerDomain: 'blog.com',
-        }),
-      );
-    });
-  });
-
-  describe('getPlayerData', () => {
-    it('should reject invalid tokens', () => {
-      expect(() =>
-        service.getPlayerData('track-123', 'invalid-token'),
-      ).toThrow();
-    });
+    expect(embedRepo.count).toHaveBeenCalled();
+    expect(embedRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        trackId: "track-1",
+        referrerDomain: "blog.example",
+      }),
+    );
   });
 });

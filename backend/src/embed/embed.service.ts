@@ -1,196 +1,257 @@
 import {
-  Injectable, NotFoundException,
-  ForbiddenException, Logger,
-} from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { EmbedView } from './entities/embed-view.entity';
-import * as crypto from 'crypto';
+  Injectable,
+  NotFoundException,
+  ForbiddenException,
+  Logger,
+} from "@nestjs/common";
+import { InjectRepository } from "@nestjs/typeorm";
+import { MoreThan, Repository } from "typeorm";
+import * as crypto from "crypto";
+import { EmbedView } from "./entities/embed-view.entity";
+import { Track } from "../tracks/entities/track.entity";
 
-const EMBED_SECRET = process.env.EMBED_SECRET || 'embed-secret-key';
+const EMBED_SECRET = process.env.EMBED_SECRET || "embed-secret-key";
+const DEFAULT_TOKEN_TTL_SECONDS = 15 * 60;
+const DOMAIN_VIEW_LIMIT = 1000;
+
+type EmbedTokenPayload = {
+  trackId: string;
+  exp: number;
+};
 
 @Injectable()
 export class EmbedService {
   private readonly logger = new Logger(EmbedService.name);
-  private readonly domainRateLimit = new Map<string, { count: number; resetAt: number }>();
 
   constructor(
     @InjectRepository(EmbedView)
     private readonly embedViewRepo: Repository<EmbedView>,
+    @InjectRepository(Track)
+    private readonly trackRepo: Repository<Track>,
   ) {}
 
-  // ─── Token Generation ─────────────────────────────────────────────────────
+  generateEmbedToken(
+    trackId: string,
+    ttlSeconds: number = DEFAULT_TOKEN_TTL_SECONDS,
+  ): string {
+    const payload: EmbedTokenPayload = {
+      trackId,
+      exp: Math.floor(Date.now() / 1000) + ttlSeconds,
+    };
+    const encodedPayload = Buffer.from(JSON.stringify(payload)).toString(
+      "base64url",
+    );
+    const signature = crypto
+      .createHmac("sha256", EMBED_SECRET)
+      .update(encodedPayload)
+      .digest("hex");
 
-  generateEmbedToken(trackId: string): string {
-    const payload = `${trackId}:${Date.now()}`;
-    return crypto
-      .createHmac('sha256', EMBED_SECRET)
-      .update(payload)
-      .digest('hex');
+    return `${encodedPayload}.${signature}`;
   }
 
   validateEmbedToken(trackId: string, token: string): boolean {
-    // In production, store tokens in Redis with TTL
-    // Here we verify the token is a valid HMAC format
-    return typeof token === 'string' && token.length === 64;
-  }
+    const payload = this.decodeToken(token);
+    if (!payload) {
+      return false;
+    }
 
-  // ─── oEmbed ───────────────────────────────────────────────────────────────
+    return (
+      payload.trackId === trackId && payload.exp > Math.floor(Date.now() / 1000)
+    );
+  }
 
   async getOEmbed(trackId: string, baseUrl: string) {
     const track = await this.getTrackOrFail(trackId);
-    this.assertEmbedEnabled(track);
+    this.assertEmbeddable(track);
 
     return {
-      version: '1.0',
-      type: 'rich',
+      version: "1.0",
+      type: "rich",
       title: track.title,
-      author_name: track.artist?.name || 'Unknown Artist',
+      author_name: track.artist?.artistName || "Unknown Artist",
       author_url: `${baseUrl}/artists/${track.artistId}`,
-      provider_name: 'TipTune',
+      provider_name: "TipTune",
       provider_url: baseUrl,
-      thumbnail_url: track.coverUrl || null,
+      thumbnail_url: track.coverArtUrl || null,
       thumbnail_width: 300,
       thumbnail_height: 300,
       html: `<iframe src="${baseUrl}/embed/${trackId}" width="100%" height="120" frameborder="0" allowtransparency="true" allow="encrypted-media"></iframe>`,
-      width: '100%',
+      width: "100%",
       height: 120,
     };
   }
 
-  // ─── Meta Tags ────────────────────────────────────────────────────────────
-
   async getMetaTags(trackId: string, baseUrl: string) {
     const track = await this.getTrackOrFail(trackId);
-    this.assertEmbedEnabled(track);
+    this.assertEmbeddable(track);
 
     const trackUrl = `${baseUrl}/tracks/${trackId}`;
     const embedUrl = `${baseUrl}/embed/${trackId}`;
+    const image = track.coverArtUrl || `${baseUrl}/default-cover.png`;
+    const description =
+      track.description || `Listen to ${track.title} on TipTune`;
 
     return {
       openGraph: {
-        'og:type':          'music.song',
-        'og:title':         track.title,
-        'og:description':   track.description || `Listen to ${track.title} on TipTune`,
-        'og:url':           trackUrl,
-        'og:image':         track.coverUrl || `${baseUrl}/default-cover.png`,
-        'og:audio':         track.audioUrl,
-        'og:audio:type':    'audio/mpeg',
-        'og:site_name':     'TipTune',
-        'music:musician':   track.artist?.name,
+        "og:type": "music.song",
+        "og:title": track.title,
+        "og:description": description,
+        "og:url": trackUrl,
+        "og:image": image,
+        "og:audio": track.audioUrl,
+        "og:audio:type": track.mimeType || "audio/mpeg",
+        "og:site_name": "TipTune",
+        "music:musician": track.artist?.artistName || "Unknown Artist",
       },
       twitterCard: {
-        'twitter:card':        'player',
-        'twitter:title':       track.title,
-        'twitter:description': track.description || `Listen on TipTune`,
-        'twitter:image':       track.coverUrl || `${baseUrl}/default-cover.png`,
-        'twitter:player':      embedUrl,
-        'twitter:player:width':  '480',
-        'twitter:player:height': '120',
+        "twitter:card": "player",
+        "twitter:title": track.title,
+        "twitter:description": description,
+        "twitter:image": image,
+        "twitter:player": embedUrl,
+        "twitter:player:width": "480",
+        "twitter:player:height": "120",
       },
     };
   }
-
-  // ─── Player Data ──────────────────────────────────────────────────────────
 
   async getPlayerData(trackId: string, token: string) {
     if (!this.validateEmbedToken(trackId, token)) {
-      throw new ForbiddenException('Invalid embed token');
+      throw new ForbiddenException("Invalid or expired embed token");
     }
 
     const track = await this.getTrackOrFail(trackId);
-    this.assertEmbedEnabled(track);
+    this.assertEmbeddable(track);
 
     return {
-      trackId:    track.id,
-      title:      track.title,
-      artist:     track.artist?.name,
-      audioUrl:   track.audioUrl,
-      coverUrl:   track.coverUrl,
-      duration:   track.duration,
-      waveformUrl: track.waveformUrl || null,
+      trackId: track.id,
+      title: track.title,
+      artist: track.artist?.artistName || null,
+      artistId: track.artistId,
+      audioUrl: track.streamingUrl || track.audioUrl,
+      coverArtUrl: track.coverArtUrl || null,
+      duration: track.duration,
+      genre: track.genre || null,
     };
   }
 
-  // ─── View Recording ───────────────────────────────────────────────────────
-
-  async recordView(trackId: string, referrer: string | null, domain: string): Promise<void> {
-    this.checkDomainRateLimit(domain);
-
+  async recordView(
+    trackId: string,
+    referrer: string | null,
+    origin: string | null,
+  ): Promise<void> {
     const track = await this.getTrackOrFail(trackId);
-    this.assertEmbedEnabled(track);
+    this.assertEmbeddable(track);
 
     const referrerDomain = this.extractDomain(referrer);
+    const originDomain = this.extractDomain(origin);
+    const activeDomain = originDomain || referrerDomain;
+
+    if (activeDomain) {
+      await this.enforceDomainRateLimit(activeDomain);
+    }
+
     await this.embedViewRepo.save(
       this.embedViewRepo.create({ trackId, referrerDomain }),
     );
   }
 
-  // ─── Analytics ────────────────────────────────────────────────────────────
-
   async getAnalytics(trackId: string) {
     const total = await this.embedViewRepo.count({ where: { trackId } });
 
     const byDomain = await this.embedViewRepo
-      .createQueryBuilder('v')
-      .where('v.trackId = :trackId', { trackId })
-      .select(['v.referrerDomain AS domain', 'COUNT(v.id) AS views'])
-      .groupBy('v.referrerDomain')
-      .orderBy('views', 'DESC')
+      .createQueryBuilder("v")
+      .where("v.trackId = :trackId", { trackId })
+      .select(["v.referrerDomain AS domain", "COUNT(v.id) AS views"])
+      .groupBy("v.referrerDomain")
+      .orderBy("views", "DESC")
       .limit(20)
       .getRawMany();
 
     const last30Days = await this.embedViewRepo
-      .createQueryBuilder('v')
-      .where('v.trackId = :trackId', { trackId })
+      .createQueryBuilder("v")
+      .where("v.trackId = :trackId", { trackId })
       .andWhere(`v.viewedAt >= NOW() - INTERVAL '30 days'`)
-      .select([`DATE_TRUNC('day', v.viewedAt) AS day`, 'COUNT(v.id) AS views'])
-      .groupBy('day')
-      .orderBy('day', 'ASC')
+      .select([`DATE_TRUNC('day', v.viewedAt) AS day`, "COUNT(v.id) AS views"])
+      .groupBy("day")
+      .orderBy("day", "ASC")
       .getRawMany();
 
     return { total, byDomain, last30Days };
   }
 
-  // ─── Private Helpers ──────────────────────────────────────────────────────
-
   private async getTrackOrFail(trackId: string) {
-    const track = await this.embedViewRepo.manager.findOne('tracks', {
+    const track = await this.trackRepo.findOne({
       where: { id: trackId },
-      relations: ['artist'],
-    } as any);
-    if (!track) throw new NotFoundException('Track not found');
-    return track as any;
+      relations: ["artist"],
+    });
+
+    if (!track) {
+      throw new NotFoundException("Track not found");
+    }
+
+    return track;
   }
 
-  private assertEmbedEnabled(track: any): void {
-    if (track.embedDisabled) {
-      throw new ForbiddenException('Embed disabled for this track');
+  private assertEmbeddable(track: Track): void {
+    if (!track.isPublic) {
+      throw new ForbiddenException("Embed is only available for public tracks");
     }
   }
 
-  private extractDomain(referrer: string | null): string | null {
-    if (!referrer) return null;
+  private decodeToken(token: string): EmbedTokenPayload | null {
+    const [encodedPayload, signature] = token.split(".");
+    if (!encodedPayload || !signature) {
+      return null;
+    }
+
+    const expectedSignature = crypto
+      .createHmac("sha256", EMBED_SECRET)
+      .update(encodedPayload)
+      .digest("hex");
+
+    const provided = Buffer.from(signature, "hex");
+    const expected = Buffer.from(expectedSignature, "hex");
+
+    if (
+      provided.length !== expected.length ||
+      !crypto.timingSafeEqual(provided, expected)
+    ) {
+      return null;
+    }
+
     try {
-      return new URL(referrer).hostname;
+      return JSON.parse(
+        Buffer.from(encodedPayload, "base64url").toString("utf8"),
+      ) as EmbedTokenPayload;
+    } catch (error) {
+      this.logger.warn(`Failed to decode embed token: ${error}`);
+      return null;
+    }
+  }
+
+  private extractDomain(url: string | null): string | null {
+    if (!url) {
+      return null;
+    }
+
+    try {
+      return new URL(url).hostname;
     } catch {
       return null;
     }
   }
 
-  private checkDomainRateLimit(domain: string, limit = 1000): void {
-    const now = Date.now();
-    const entry = this.domainRateLimit.get(domain);
+  private async enforceDomainRateLimit(domain: string): Promise<void> {
+    const recentCount = await this.embedViewRepo.count({
+      where: {
+        referrerDomain: domain,
+        viewedAt: MoreThan(new Date(Date.now() - 60 * 60 * 1000)),
+      },
+    });
 
-    if (!entry || entry.resetAt < now) {
-      this.domainRateLimit.set(domain, { count: 1, resetAt: now + 3_600_000 });
-      return;
+    if (recentCount >= DOMAIN_VIEW_LIMIT) {
+      throw new ForbiddenException("Rate limit exceeded for this domain");
     }
-
-    if (entry.count >= limit) {
-      throw new ForbiddenException('Rate limit exceeded for this domain');
-    }
-
-    entry.count++;
   }
 }

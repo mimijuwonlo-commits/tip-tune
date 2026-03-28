@@ -12,6 +12,7 @@ import {
 import { Artist } from "../../artists/entities/artist.entity";
 import { Track } from "../../tracks/entities/track.entity";
 import { TipGoal } from "../../goals/entities/tip-goal.entity";
+import { User } from "../../users/entities/user.entity";
 
 export enum TipStatus {
   PENDING = "pending",
@@ -30,6 +31,7 @@ export enum TipType {
 @Index(["artistId", "status"])
 @Index(["trackId", "status"])
 @Index(["goalId", "status"])
+@Index(["fromUser", "status"])
 @Index(["createdAt"])
 export class Tip {
   @PrimaryGeneratedColumn("uuid")
@@ -161,4 +163,8 @@ export class Tip {
   @ManyToOne(() => TipGoal, (goal) => goal.tips, { onDelete: "SET NULL" })
   @JoinColumn({ name: "goalId" })
   goal?: TipGoal;
+
+  @ManyToOne(() => User, { onDelete: "SET NULL", nullable: true })
+  @JoinColumn({ name: "fromUser" })
+  sender?: User;
 }

@@ -26,14 +26,14 @@ export class NotificationsService {
     title: string;
     message: string;
     data?: any;
-    fromUserId?: string;
+    fromUser?: string;
   }) {
     // Check if the recipient has muted the sender (suppress notification)
-    if (createNotificationDto.fromUserId) {
+    if (createNotificationDto.fromUser) {
       const shouldSuppress =
         await this.blocksService.shouldSuppressNotification(
           createNotificationDto.userId,
-          createNotificationDto.fromUserId,
+          createNotificationDto.fromUser,
         );
       if (shouldSuppress) {
         // Still save the notification but don't send real-time alert
@@ -76,7 +76,7 @@ export class NotificationsService {
     const data = {
       tipId: tip.id,
       amount: tip.amount,
-      senderId: tip.fromUserId,
+      fromUser: tip.fromUser,
       stellarTxHash: tip.stellarTxHash,
     };
 

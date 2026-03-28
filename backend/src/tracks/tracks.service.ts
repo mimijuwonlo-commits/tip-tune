@@ -16,10 +16,10 @@ import { StorageService } from "../storage/storage.service";
 import { ActivitiesService } from "../activities/activities.service";
 import { EventEmitter2 } from "@nestjs/event-emitter";
 import { TrackUploadedEvent } from "./events/track-uploaded.event";
-import { TrackPlayedEvent } from "./events/track-played.event";
 import { LicensingService } from "@/track-listening-right-management/licensing.service";
 import { PaginatedResult } from "@/events-live-show/events.service";
 import { ResourceNotFoundException } from "../common/exceptions/api-exception";
+import { PlayCountService } from "../track-play-count/play-count.service";
 
 @Injectable()
 export class TracksService {
@@ -33,6 +33,7 @@ export class TracksService {
     private activitiesService: ActivitiesService,
     private eventEmitter: EventEmitter2,
     private licensingService: LicensingService,
+    private playCountService: PlayCountService,
   ) {}
 
   async create(
@@ -183,7 +184,7 @@ export class TracksService {
     });
 
     if (!track) {
-      throw new ResourceNotFoundException('Track', id);
+      throw new ResourceNotFoundException("Track", id);
     }
 
     return track;
@@ -223,20 +224,11 @@ export class TracksService {
   }
 
   async incrementPlayCount(id: string): Promise<Track> {
-    const track = await this.findOne(id);
+    this.logger.warn(
+      `Legacy track play endpoint invoked for ${id}; syncing aggregate from canonical play events`,
+    );
 
-    track.plays += 1;
-
-    const updatedTrack = await this.tracksRepository.save(track);
-
-    if (updatedTrack.artistId) {
-      this.eventEmitter.emit(
-        "track.played",
-        new TrackPlayedEvent(updatedTrack.id, updatedTrack.artistId, null),
-      );
-    }
-
-    return updatedTrack;
+    return this.playCountService.rebuildTrackPlayTotal(id);
   }
 
   async addTips(id: string, amount: number): Promise<Track> {

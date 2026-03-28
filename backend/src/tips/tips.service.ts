@@ -23,6 +23,7 @@ import { FeesService } from "../fees/fees.service";
 import { ModerationService } from "../moderation/moderation.service";
 import { BlocksService } from "../blocks/blocks.service";
 import { TipReconciliationService } from "./tip-reconciliation.service";
+import { User } from "../users/entities/user.entity";
 
 // Make sure to define PaginatedResponseDto locally or import it from the correct path if it exists
 export interface PaginatedResponseDto<T> {
@@ -65,7 +66,14 @@ export class TipsService {
   ) {}
 
   async create(userId: string, createTipDto: CreateTipDto): Promise<Tip> {
-    const { artistId, trackId, stellarTxHash, message, idempotencyKey, metadata } = createTipDto;
+    const {
+      artistId,
+      trackId,
+      stellarTxHash,
+      message,
+      idempotencyKey,
+      metadata,
+    } = createTipDto;
 
     // --- Idempotency key check: replay the original response if key already seen ---
     if (idempotencyKey) {
@@ -168,6 +176,7 @@ export class TipsService {
     const newTip = this.tipRepository.create({
       artistId,
       trackId,
+      fromUser: userId,
       stellarTxHash,
       senderAddress: senderAddress || "anonymous",
       receiverAddress,
@@ -209,7 +218,7 @@ export class TipsService {
   async findOne(id: string): Promise<Tip> {
     const tip = await this.tipRepository.findOne({
       where: { id },
-      relations: ["fromUser", "artist", "track"],
+      relations: ["sender", "artist", "track"],
     });
 
     if (!tip) {
@@ -230,7 +239,7 @@ export class TipsService {
       .createQueryBuilder("tip")
       .leftJoinAndSelect("tip.artist", "artist")
       .leftJoinAndSelect("tip.track", "track")
-      .where("tip.fromUserId = :userId", { userId })
+      .where("tip.fromUser = :userId", { userId })
       .andWhere("artist.isDeleted = false")
       .orderBy("tip.createdAt", "DESC")
       .skip(skip)
@@ -262,10 +271,15 @@ export class TipsService {
 
     const queryBuilder = this.tipRepository
       .createQueryBuilder("tip")
-      .leftJoinAndSelect("tip.fromUser", "user")
+      .leftJoinAndMapOne(
+        "tip.sender",
+        User,
+        "sender",
+        "sender.id = tip.fromUser",
+      )
       .leftJoinAndSelect("tip.track", "track")
       .where("tip.artistId = :artistId", { artistId })
-      .andWhere("user.isDeleted = false")
+      .andWhere("(sender.id IS NULL OR sender.isDeleted = false)")
       .orderBy("tip.createdAt", "DESC")
       .skip(skip)
       .take(limit);
@@ -278,8 +292,8 @@ export class TipsService {
     const [originalData, total] = await queryBuilder.getManyAndCount();
 
     const data = originalData.map((tip) => {
-      if (tip.fromUser && (tip.fromUser as any).isDeleted) {
-        tip.fromUser = null;
+      if (tip.sender && (tip.sender as any).isDeleted) {
+        tip.sender = null;
         tip.senderAddress = "anonymous";
       }
       return tip;
@@ -308,23 +322,23 @@ export class TipsService {
   async getArtistTipStats(artistId: string): Promise<{
     totalTips: number;
     totalAmount: number;
-    totalUsdValue: number;
+    totalFiatValue: number;
     averageTip: number;
   }> {
     const result = await this.tipRepository
       .createQueryBuilder("tip")
       .select("COUNT(*)", "totalTips")
       .addSelect("SUM(tip.amount)", "totalAmount")
-      .addSelect("SUM(tip.usdValue)", "totalUsdValue")
+      .addSelect("SUM(COALESCE(tip.fiatAmount, 0))", "totalFiatValue")
       .addSelect("AVG(tip.amount)", "averageTip")
-      .where("tip.toArtistId = :artistId", { artistId })
+      .where("tip.artistId = :artistId", { artistId })
       .andWhere("tip.status = :status", { status: TipStatus.VERIFIED })
       .getRawOne();
 
     return {
       totalTips: parseInt(result.totalTips) || 0,
       totalAmount: parseFloat(result.totalAmount) || 0,
-      totalUsdValue: parseFloat(result.totalUsdValue) || 0,
+      totalFiatValue: parseFloat(result.totalFiatValue) || 0,
       averageTip: parseFloat(result.averageTip) || 0,
     };
   }

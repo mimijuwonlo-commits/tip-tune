@@ -1,20 +1,20 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
-import { RecommendationFeedback } from './entities/recommendation-feedback.entity';
+import { Injectable, Logger } from "@nestjs/common";
+import { InjectRepository } from "@nestjs/typeorm";
+import { Repository, DataSource } from "typeorm";
+import { RecommendationFeedback } from "./entities/recommendation-feedback.entity";
+import { TipStatus } from "../tips/entities/tip.entity";
 
-/**
- * Hybrid recommendation engine combining collaborative filtering
- * (based on tip patterns) and content-based filtering (genre similarity).
- *
- * Algorithm:
- *   1. Collaborative: Find users with similar tipping behavior, recommend
- *      tracks they tipped that the target user hasn't seen.
- *   2. Content-based: Match genres/artists the user has tipped.
- *   3. Hybrid: Weighted merge (60% collaborative, 40% content-based).
- *   4. Diversity: Inject random tracks to avoid filter bubbles.
- *   5. Cold start: Fall back to popularity-based for new users.
- */
+type RecommendationTrackRow = {
+  id: string;
+  title: string;
+  audioUrl: string;
+  coverArtUrl: string | null;
+  genre: string | null;
+  artistId: string | null;
+  artistName: string | null;
+  score: string | number;
+};
+
 @Injectable()
 export class RecommendationsService {
   private readonly logger = new Logger(RecommendationsService.name);
@@ -25,130 +25,141 @@ export class RecommendationsService {
     private readonly dataSource: DataSource,
   ) {}
 
-  /**
-   * Get personalized track recommendations for a user.
-   */
   async getTrackRecommendations(
     userId: string,
     limit: number = 20,
   ): Promise<any[]> {
-    // Check if user has enough history for collaborative filtering
+    const boundedLimit = Math.max(1, Math.min(limit, 50));
     const tipCount = await this.getUserTipCount(userId);
 
     if (tipCount < 3) {
-      // Cold start: return popular tracks
-      return this.getPopularTracks(limit);
+      return this.getPopularTracks(boundedLimit);
     }
 
-    // Hybrid: merge collaborative and content-based
-    const collaborative = await this.collaborativeFilter(userId, limit);
-    const contentBased = await this.contentBasedFilter(userId, limit);
+    const collaborative = await this.collaborativeFilter(userId, boundedLimit);
+    const contentBased = await this.contentBasedFilter(userId, boundedLimit);
 
-    return this.mergeRecommendations(collaborative, contentBased, limit);
+    return this.mergeRecommendations(collaborative, contentBased, boundedLimit);
   }
 
-  /**
-   * Get artist recommendations based on user's tipping history.
-   */
   async getArtistRecommendations(userId: string): Promise<any[]> {
-    const result = await this.dataSource.query(
-      `SELECT DISTINCT a.id, a."displayName", a.genre,
-              COUNT(t.id) as tip_count,
-              SUM(t.amount) as total_tipped
-       FROM artists a
-       JOIN tracks tr ON tr."artistId" = a.id
-       JOIN tips t ON t."trackId" = tr.id
-       WHERE t."trackId" IN (
-         SELECT DISTINCT t2."trackId"
-         FROM tips t2
-         WHERE t2."senderId" IN (
-           SELECT DISTINCT t3."senderId"
-           FROM tips t3
-           WHERE t3."trackId" IN (
-             SELECT "trackId" FROM tips WHERE "senderId" = $1
-           )
-           AND t3."senderId" != $1
-         )
-       )
-       AND a.id NOT IN (
-         SELECT DISTINCT tr2."artistId"
-         FROM tips t4
-         JOIN tracks tr2 ON tr2.id = t4."trackId"
-         WHERE t4."senderId" = $1
-       )
-       GROUP BY a.id, a."displayName", a.genre
-       ORDER BY tip_count DESC
-       LIMIT 10`,
-      [userId],
-    );
+    const trackRecommendations = await this.getTrackRecommendations(userId, 30);
+    const artists = new Map<string, any>();
 
-    return result;
+    for (const track of trackRecommendations) {
+      if (!track.artistId) {
+        continue;
+      }
+
+      const existing = artists.get(track.artistId);
+      if (existing) {
+        existing.score += Number(track.score || 0);
+        existing.trackCount += 1;
+        continue;
+      }
+
+      artists.set(track.artistId, {
+        id: track.artistId,
+        artistName: track.artistName,
+        genre: track.genre,
+        score: Number(track.score || 0),
+        trackCount: 1,
+      });
+    }
+
+    return [...artists.values()]
+      .sort((a, b) => b.score - a.score || b.trackCount - a.trackCount)
+      .slice(0, 10);
   }
 
-  /**
-   * Record user feedback (thumbs up/down) on a recommendation.
-   */
   async recordFeedback(
     userId: string,
     trackId: string,
-    feedback: 'up' | 'down',
+    feedback: "up" | "down",
   ): Promise<RecommendationFeedback> {
+    const existing = await this.feedbackRepo.findOne({
+      where: { userId, trackId },
+    });
+
+    if (existing) {
+      existing.feedback = feedback;
+      return this.feedbackRepo.save(existing);
+    }
+
     const entry = this.feedbackRepo.create({ userId, trackId, feedback });
     return this.feedbackRepo.save(entry);
   }
 
-  // ── Internal Methods ───────────────────────────────────────────────────────
-
   private async getUserTipCount(userId: string): Promise<number> {
     const result = await this.dataSource.query(
-      `SELECT COUNT(*) as count FROM tips WHERE "senderId" = $1`,
-      [userId],
+      `SELECT COUNT(*)::int AS count
+       FROM tips
+       WHERE "fromUser" = $1
+         AND status = $2`,
+      [userId, TipStatus.VERIFIED],
     );
-    return parseInt(result[0]?.count || '0', 10);
+
+    return Number(result[0]?.count || 0);
   }
 
-  /**
-   * Collaborative filtering: find tracks tipped by users with similar
-   * tipping patterns to the target user.
-   */
   private async collaborativeFilter(
     userId: string,
     limit: number,
   ): Promise<any[]> {
     const result = await this.dataSource.query(
       `WITH user_tracks AS (
-         SELECT DISTINCT "trackId" FROM tips WHERE "senderId" = $1
+         SELECT DISTINCT "trackId"
+         FROM tips
+         WHERE "fromUser" = $1
+           AND status = $2
+           AND "trackId" IS NOT NULL
        ),
        similar_users AS (
-         SELECT t."senderId", COUNT(*) as overlap
+         SELECT t."fromUser" AS sender_id, COUNT(*)::int AS overlap
          FROM tips t
-         JOIN user_tracks ut ON t."trackId" = ut."trackId"
-         WHERE t."senderId" != $1
-         GROUP BY t."senderId"
+         INNER JOIN user_tracks ut ON ut."trackId" = t."trackId"
+         WHERE t."fromUser" != $1
+           AND t.status = $2
+         GROUP BY t."fromUser"
          ORDER BY overlap DESC
          LIMIT 50
+       ),
+       disliked_tracks AS (
+         SELECT "trackId"
+         FROM recommendation_feedback
+         WHERE "userId" = $1
+           AND feedback = 'down'
        )
-       SELECT DISTINCT tr.id, tr.title, tr."audioUrl", tr.genre,
-              a."displayName" as artist_name,
-              COUNT(t.id) as recommendation_score
-       FROM tips t
-       JOIN similar_users su ON t."senderId" = su."senderId"
-       JOIN tracks tr ON tr.id = t."trackId"
-       LEFT JOIN artists a ON a.id = tr."artistId"
-       WHERE t."trackId" NOT IN (SELECT "trackId" FROM user_tracks)
-       GROUP BY tr.id, tr.title, tr."audioUrl", tr.genre, a."displayName"
-       ORDER BY recommendation_score DESC
-       LIMIT $2`,
-      [userId, limit],
+       SELECT tr.id,
+              tr.title,
+              tr."audioUrl",
+              tr."coverArtUrl",
+              tr.genre,
+              tr."artistId",
+              a."artistName" AS "artistName",
+              COALESCE(SUM(su.overlap), 0)::int AS score
+       FROM similar_users su
+       INNER JOIN tips t
+         ON t."fromUser" = su.sender_id
+        AND t.status = $2
+       INNER JOIN tracks tr
+         ON tr.id = t."trackId"
+       LEFT JOIN artists a
+         ON a.id = tr."artistId"
+       WHERE tr."isPublic" = true
+         AND tr.id NOT IN (SELECT "trackId" FROM user_tracks)
+         AND tr.id NOT IN (SELECT "trackId" FROM disliked_tracks)
+       GROUP BY tr.id, a.id
+       ORDER BY score DESC, tr.plays DESC, tr."createdAt" DESC
+       LIMIT $3`,
+      [userId, TipStatus.VERIFIED, limit],
     );
 
-    return result.map((r: any) => ({ ...r, source: 'collaborative' }));
+    return result.map((row: RecommendationTrackRow) =>
+      this.mapTrackRow(row, "collaborative"),
+    );
   }
 
-  /**
-   * Content-based filtering: recommend tracks in genres the user has
-   * previously tipped.
-   */
   private async contentBasedFilter(
     userId: string,
     limit: number,
@@ -157,53 +168,79 @@ export class RecommendationsService {
       `WITH user_genres AS (
          SELECT DISTINCT tr.genre
          FROM tips t
-         JOIN tracks tr ON tr.id = t."trackId"
-         WHERE t."senderId" = $1
+         INNER JOIN tracks tr ON tr.id = t."trackId"
+         WHERE t."fromUser" = $1
+           AND t.status = $2
+           AND tr.genre IS NOT NULL
        ),
        user_tracks AS (
-         SELECT DISTINCT "trackId" FROM tips WHERE "senderId" = $1
+         SELECT DISTINCT "trackId"
+         FROM tips
+         WHERE "fromUser" = $1
+           AND status = $2
+           AND "trackId" IS NOT NULL
+       ),
+       disliked_tracks AS (
+         SELECT "trackId"
+         FROM recommendation_feedback
+         WHERE "userId" = $1
+           AND feedback = 'down'
        )
-       SELECT tr.id, tr.title, tr."audioUrl", tr.genre,
-              a."displayName" as artist_name,
-              COUNT(t.id) as popularity
+       SELECT tr.id,
+              tr.title,
+              tr."audioUrl",
+              tr."coverArtUrl",
+              tr.genre,
+              tr."artistId",
+              a."artistName" AS "artistName",
+              COUNT(t.id)::int AS score
        FROM tracks tr
-       JOIN user_genres ug ON tr.genre = ug.genre
+       INNER JOIN user_genres ug ON ug.genre = tr.genre
        LEFT JOIN artists a ON a.id = tr."artistId"
-       LEFT JOIN tips t ON t."trackId" = tr.id
-       WHERE tr.id NOT IN (SELECT "trackId" FROM user_tracks)
-       GROUP BY tr.id, tr.title, tr."audioUrl", tr.genre, a."displayName"
-       ORDER BY popularity DESC
-       LIMIT $2`,
-      [userId, limit],
+       LEFT JOIN tips t
+         ON t."trackId" = tr.id
+        AND t.status = $2
+       WHERE tr."isPublic" = true
+         AND tr.id NOT IN (SELECT "trackId" FROM user_tracks)
+         AND tr.id NOT IN (SELECT "trackId" FROM disliked_tracks)
+       GROUP BY tr.id, a.id
+       ORDER BY score DESC, tr.plays DESC, tr."createdAt" DESC
+       LIMIT $3`,
+      [userId, TipStatus.VERIFIED, limit],
     );
 
-    return result.map((r: any) => ({ ...r, source: 'content' }));
+    return result.map((row: RecommendationTrackRow) =>
+      this.mapTrackRow(row, "content"),
+    );
   }
 
-  /**
-   * Popularity-based fallback for cold-start users.
-   */
   private async getPopularTracks(limit: number): Promise<any[]> {
     const result = await this.dataSource.query(
-      `SELECT tr.id, tr.title, tr."audioUrl", tr.genre,
-              a."displayName" as artist_name,
-              COUNT(t.id) as tip_count
+      `SELECT tr.id,
+              tr.title,
+              tr."audioUrl",
+              tr."coverArtUrl",
+              tr.genre,
+              tr."artistId",
+              a."artistName" AS "artistName",
+              COUNT(t.id)::int AS score
        FROM tracks tr
        LEFT JOIN artists a ON a.id = tr."artistId"
-       LEFT JOIN tips t ON t."trackId" = tr.id
-       GROUP BY tr.id, tr.title, tr."audioUrl", tr.genre, a."displayName"
-       ORDER BY tip_count DESC
-       LIMIT $1`,
-      [limit],
+       LEFT JOIN tips t
+         ON t."trackId" = tr.id
+        AND t.status = $1
+       WHERE tr."isPublic" = true
+       GROUP BY tr.id, a.id
+       ORDER BY score DESC, tr.plays DESC, tr."createdAt" DESC
+       LIMIT $2`,
+      [TipStatus.VERIFIED, limit],
     );
 
-    return result.map((r: any) => ({ ...r, source: 'popular' }));
+    return result.map((row: RecommendationTrackRow) =>
+      this.mapTrackRow(row, "popular"),
+    );
   }
 
-  /**
-   * Merge collaborative and content-based results with diversity injection.
-   * 60% collaborative, 40% content-based.
-   */
   private mergeRecommendations(
     collaborative: any[],
     contentBased: any[],
@@ -217,14 +254,30 @@ export class RecommendationsService {
       ...contentBased.slice(0, contentCount),
     ];
 
-    // Deduplicate by track ID
     const seen = new Set<string>();
-    const unique = merged.filter((track) => {
-      if (seen.has(track.id)) return false;
-      seen.add(track.id);
-      return true;
-    });
+    return merged
+      .filter((track) => {
+        if (seen.has(track.id)) {
+          return false;
+        }
 
-    return unique.slice(0, limit);
+        seen.add(track.id);
+        return true;
+      })
+      .slice(0, limit);
+  }
+
+  private mapTrackRow(row: RecommendationTrackRow, source: string) {
+    return {
+      id: row.id,
+      title: row.title,
+      audioUrl: row.audioUrl,
+      coverArtUrl: row.coverArtUrl,
+      genre: row.genre,
+      artistId: row.artistId,
+      artistName: row.artistName,
+      score: Number(row.score || 0),
+      source,
+    };
   }
 }
